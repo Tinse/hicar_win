@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <thread>
 
 #include <winrt/base.h>
@@ -50,7 +51,7 @@ std::string read_hotspot_bssid(const std::string& ssid) {
 
       PWLAN_BSS_LIST list = nullptr;
       const DWORD result = WlanGetNetworkBssList(handle, &interfaces->InterfaceInfo[i].InterfaceGuid,
-                                                 &filter, dot11_BSS_type_infrastructure, FALSE, nullptr,
+                                                 &filter, dot11_BSS_type_any, FALSE, nullptr,
                                                  &list);
       if (result == ERROR_SUCCESS && list != nullptr) {
         for (DWORD j = 0; j < list->dwNumberOfItems; ++j) {
@@ -87,7 +88,7 @@ uint32_t read_hotspot_frequency(const std::string& ssid) {
 
       PWLAN_BSS_LIST list = nullptr;
       const DWORD result = WlanGetNetworkBssList(handle, &interfaces->InterfaceInfo[i].InterfaceGuid,
-                                                 &filter, dot11_BSS_type_infrastructure, FALSE, nullptr,
+                                                 &filter, dot11_BSS_type_any, FALSE, nullptr,
                                                  &list);
       if (result == ERROR_SUCCESS && list != nullptr) {
         for (DWORD j = 0; j < list->dwNumberOfItems; ++j) {
@@ -145,6 +146,32 @@ AdapterAddress find_ics_adapter() {
   }
   std::free(addresses);
   return found;
+}
+
+std::string read_wifi_direct_mac() {
+  ULONG size = 0;
+  const ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+  if (GetAdaptersAddresses(AF_INET, flags, nullptr, nullptr, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
+    return {};
+  }
+  auto* addresses = static_cast<IP_ADAPTER_ADDRESSES*>(std::malloc(size));
+  if (addresses == nullptr) return {};
+  std::string mac;
+  if (GetAdaptersAddresses(AF_INET, flags, nullptr, addresses, &size) == ERROR_SUCCESS) {
+    for (auto* adapter = addresses; adapter != nullptr; adapter = adapter->Next) {
+      if (adapter->PhysicalAddressLength < 6) continue;
+      const wchar_t* description = adapter->Description;
+      if (description == nullptr || std::wcsstr(description, L"Wi-Fi Direct") == nullptr) continue;
+      const auto* bytes = adapter->PhysicalAddress;
+      char text[18];
+      std::snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x",
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+      mac = text;
+      if (adapter->OperStatus == IfOperStatusUp) break;
+    }
+  }
+  std::free(addresses);
+  return mac;
 }
 
 }  // namespace
@@ -240,18 +267,20 @@ bool start_hotspot(const HotspotConfig& config, HotspotInfo* info, std::string* 
     info->ssid = winrt::to_string(current.Ssid());
     info->passphrase = winrt::to_string(current.Passphrase());
 
-    const auto ics = find_ics_adapter();
-    info->car_ip = ics.ip.empty() ? "192.168.137.1" : ics.ip;
-    info->adapter_name = ics.name;
-
+    AdapterAddress ics;
     std::string bssid;
     for (int attempt = 0; attempt < 12; ++attempt) {
+      ics = find_ics_adapter();
       bssid = read_hotspot_bssid(info->ssid);
       info->frequency_mhz = read_hotspot_frequency(info->ssid);
-      if (!bssid.empty() && info->frequency_mhz != 0) break;
+      if (!ics.ip.empty() && !ics.mac.empty() && !bssid.empty() && info->frequency_mhz != 0) break;
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
-    info->bssid = bssid.empty() ? ics.mac : bssid;
+    info->car_ip = ics.ip.empty() ? "192.168.137.1" : ics.ip;
+    info->adapter_name = ics.name;
+    info->bssid = bssid;
+    if (info->bssid.empty()) info->bssid = ics.mac;
+    if (info->bssid.empty()) info->bssid = read_wifi_direct_mac();
     if (info->frequency_mhz == 0) {
       try {
         const auto band = current.Band();
