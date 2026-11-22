@@ -1,6 +1,7 @@
 #include "hisight/video.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -105,30 +106,43 @@ void VideoDepacketizer::process_packet(const uint8_t* packet, size_t size) {
 
 void VideoDepacketizer::deliver() {
   const size_t n = pes_.size();
-  if (n < 14 || pes_[0] != 0 || pes_[1] != 0 || pes_[2] != 1) fail("视频 PES 头截断或起始码错误");
-  const uint16_t declared = be16(pes_.data() + 4);
-  if (declared != 0 && static_cast<size_t>(declared) + 6 != n) fail("视频 PES 声明长度与实际不符");
-  const uint8_t flags = pes_[7];
+  // 部分 HarmonyOS 手机在 PES 前多带 1 个（或几个）填充字节，直接按 0 偏移
+  // 校验会把正常流判成“起始码错误”。在头部有限范围内找到第一个 00 00 01。
+  size_t base = 0;
+  while (base + 3 < n && !(pes_[base] == 0 && pes_[base + 1] == 0 && pes_[base + 2] == 1)) ++base;
+  if (base + 3 >= n) {
+    std::fprintf(stderr, "[HiSight] PES 起始码缺失，前 32 字节：");
+    for (size_t i = 0; i < n && i < 32; ++i) std::fprintf(stderr, "%02x", pes_[i]);
+    std::fprintf(stderr, "\n");
+    fail("视频 PES 头截断或起始码错误");
+  }
+  if (base != 0) std::fprintf(stderr, "[HiSight] PES 起始偏移 %zu\n", base);
+  const uint8_t* p = pes_.data() + base;
+  const size_t m = n - base;
+  if (m < 14) fail("视频 PES 头截断或起始码错误");
+  const uint16_t declared = be16(p + 4);
+  if (declared != 0 && static_cast<size_t>(declared) + 6 != m) fail("视频 PES 声明长度与实际不符");
+  const uint8_t flags = p[7];
   // PES 第 6 字节只要求最高两位是 '10'；0x80/0x84 都合法（0x84 只是置了
   // data_alignment_indicator）。写死 0x84 会把部分手机的正常流直接判失败。
-  if ((pes_[6] & 0xC0) != 0x80 || (flags & 0x80) == 0) fail("视频 PES 标志不是 '10' 或缺少 PTS");
-  const uint64_t pts = ((static_cast<uint64_t>(pes_[9]) & 0x06) << 29) |
-                       ((static_cast<uint64_t>(pes_[10]) & 0xFF) << 22) |
-                       ((static_cast<uint64_t>(pes_[11]) & 0xFE) << 14) |
-                       ((static_cast<uint64_t>(pes_[12]) & 0xFF) << 7) |
-                       ((static_cast<uint64_t>(pes_[13]) & 0xFE) >> 1);
-  const uint8_t header_data = pes_[8];
+  if ((p[6] & 0xC0) != 0x80 || (flags & 0x80) == 0) fail("视频 PES 标志不是 '10' 或缺少 PTS");
+  const uint64_t pts = ((static_cast<uint64_t>(p[9]) & 0x06) << 29) |
+                       ((static_cast<uint64_t>(p[10]) & 0xFF) << 22) |
+                       ((static_cast<uint64_t>(p[11]) & 0xFE) << 14) |
+                       ((static_cast<uint64_t>(p[12]) & 0xFF) << 7) |
+                       ((static_cast<uint64_t>(p[13]) & 0xFE) >> 1);
+  const uint8_t header_data = p[8];
   // PES_header_data_length 从第 8 字节之后开始计数：PTS 5 字节 + 可选扩展。
   // 所以 ES 起点始终是 9 + header_data；原来扩展分支写成 15 + header_data，
   // 会多跳过 6 字节，把 H.264 起始码/密文开头一起丢掉，表现就是黑屏。
   if ((flags & 0x80) != 0 && header_data < 5) fail("视频 PES 声明带 PTS 但头长度不足");
   const size_t es_offset = 9 + static_cast<size_t>(header_data);
-  if (es_offset + 16 >= n) fail("视频 PES 缺少完整 IV 或 ES 为空");
+  if (es_offset + 16 >= m) fail("视频 PES 缺少完整 IV 或 ES 为空");
   const size_t cipher_start = es_offset + 16;
-  const size_t es_length = n - cipher_start;
+  const size_t es_length = m - cipher_start;
   es_.resize(es_length);
-  const auto decrypted = dmsdp::aes128_ctr_crypt(key_.data(), pes_.data() + es_offset,
-                                                 pes_.data() + cipher_start, es_length);
+  const auto decrypted = dmsdp::aes128_ctr_crypt(key_.data(), p + es_offset,
+                                                 p + cipher_start, es_length);
   std::copy(decrypted.begin(), decrypted.end(), es_.begin());
 
   AccessUnit unit;
