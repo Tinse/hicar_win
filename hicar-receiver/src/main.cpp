@@ -36,6 +36,7 @@ struct Options {
   bool phone_sim = false;
   bool bt_info = false;
   bool ble_test = false;
+  bool no_ble = false;
   bool app_demo = false;
   bool audio_demo = false;
   int seconds = 60;
@@ -59,7 +60,7 @@ void usage() {
       "                 [--model 000480] [--sub 00] [--bt 02:12:34:56:78:9A]\n"
       "      输出 91 字节 carInfo（USB 控制传输 0x40/0x34/0xA0 的载荷）\n"
       "  hicar_receiver --serve [--bind 0.0.0.0] [--ip 192.168.66.150] [--port 32400]\n"
-      "                 [--bt 02:12:34:56:78:9A] [--link usb|bt|wifi]\n"
+      "                 [--bt 02:12:34:56:78:9A] [--link usb|bt|wifi] [--no-ble]\n"
       "      起控制通道 TCP 监听，处理 nearby 握手与业务 19/20 的子连接\n"
       "  hicar_receiver --phone-sim --ip 127.0.0.1 --port 32400\n"
       "      本机模拟手机端跑一遍握手与建 socket，用于自测\n"
@@ -112,6 +113,8 @@ int main(int argc, char** argv) {
       opt.bt_info = true;
     } else if (arg == "--ble-test") {
       opt.ble_test = true;
+    } else if (arg == "--no-ble") {
+      opt.no_ble = true;
     } else if (arg == "--app-demo") {
       opt.app_demo = true;
     } else if (arg == "--audio-demo") {
@@ -235,6 +238,7 @@ int main(int argc, char** argv) {
     config.control_port = static_cast<uint16_t>(opt.port);
     config.host = hicar::default_host_identity();
     config.keys = hicar::default_nearby_keys();
+    config.disable_ble = opt.no_ble;
     if (has_bluetooth) config.bluetooth_address = bluetooth;
     if (opt.link == "bt" || opt.link == "bluetooth") {
       config.link = hicar::NearbyLink::kBluetooth;

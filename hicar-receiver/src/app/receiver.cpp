@@ -142,12 +142,16 @@ bool Receiver::start(std::string* error) {
     std::array<uint8_t, 4> model4{};
     for (size_t i = 0; i < model4.size() - 1; ++i) model4[i] = config_.host.model_id[i];
     model4[3] = config_.host.sub_model_id;
-    std::random_device ble_device;
-    std::string ble_error;
-    if (ble_advertiser_.start(model4, static_cast<uint8_t>(ble_device() & 0xFF), "HiCar-Windows", &ble_error)) {
-      std::printf("  BLE 发现广播已开：FDEE service data（手机 HiCar 应能直接弹窗）\n");
+    if (config_.disable_ble) {
+      std::printf("  BLE 发现广播已关闭：扫码连接模式\n");
     } else {
-      std::fprintf(stderr, "[配对] BLE 广播未启动（仍可用二维码）：%s\n", ble_error.c_str());
+      std::random_device ble_device;
+      std::string ble_error;
+      if (ble_advertiser_.start(model4, static_cast<uint8_t>(ble_device() & 0xFF), "HiCar-Windows", &ble_error)) {
+        std::printf("  BLE 发现广播已开：FDEE service data（手机 HiCar 应能直接弹窗）\n");
+      } else {
+        std::fprintf(stderr, "[配对] BLE 广播未启动（仍可用二维码）：%s\n", ble_error.c_str());
+      }
     }
 
     qr_window_ = std::make_unique<platform::QrWindow>();

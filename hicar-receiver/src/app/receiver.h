@@ -31,6 +31,7 @@ struct ReceiverConfig {
   uint16_t control_port = 32400;
   std::optional<std::array<uint8_t, 6>> bluetooth_address;
   NearbyLink link = NearbyLink::kUsb;
+  bool disable_ble = false;  // 扫码连接模式：不广播 BLE，避免手机走未实现的 BLE 发现链路
   HostIdentity host;
   NearbyKeyMaterial keys;
 };
