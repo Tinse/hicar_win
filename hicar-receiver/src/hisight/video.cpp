@@ -1,0 +1,147 @@
+#include "hisight/video.h"
+
+#include <algorithm>
+#include <cstring>
+#include <stdexcept>
+
+#include "dmsdp/cipher.h"
+
+namespace hicar {
+namespace hisight {
+namespace {
+
+constexpr uint32_t kMaxPacket = 10u * 1024u * 1024u;
+constexpr uint16_t kLastSequence = 64999;
+
+uint16_t be16(const uint8_t* data) {
+  return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+}
+
+uint32_t be32(const uint8_t* data) {
+  return (static_cast<uint32_t>(data[0]) << 24) | (static_cast<uint32_t>(data[1]) << 16) |
+         (static_cast<uint32_t>(data[2]) << 8) | data[3];
+}
+
+}  // namespace
+
+VideoDepacketizer::VideoDepacketizer(std::array<uint8_t, 16> session_key, AccessUnitSink sink)
+    : key_(session_key), sink_(std::move(sink)) {}
+
+void VideoDepacketizer::fail(const std::string& message) {
+  failed_ = true;
+  throw std::runtime_error(message);
+}
+
+void VideoDepacketizer::feed(const uint8_t* data, size_t size) {
+  if (failed_) throw std::runtime_error("视频流已经失败");
+  if (data == nullptr || size == 0) return;
+  pending_.insert(pending_.end(), data, data + size);
+  consume();
+}
+
+void VideoDepacketizer::consume() {
+  while (!failed_) {
+    const size_t available = pending_.size() - pending_offset_;
+    if (available < 4) break;
+    const uint32_t length = be32(pending_.data() + pending_offset_);
+    if (length < 12 || length > kMaxPacket) fail("视频 RTP 包长不在 12..10MiB");
+    if (available < 4 + length) break;
+    process_packet(pending_.data() + pending_offset_ + 4, length);
+    pending_offset_ += 4 + length;
+  }
+  if (pending_offset_ > 0) {
+    pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(pending_offset_));
+    pending_offset_ = 0;
+  }
+}
+
+void VideoDepacketizer::process_packet(const uint8_t* packet, size_t size) {
+  const uint8_t b0 = packet[0];
+  const uint8_t b1 = packet[1];
+  if ((b0 >> 6) != 2) fail("视频 RTP 版本不是 2");
+  if ((b0 & 0x20) != 0) fail("视频 RTP 带 padding，未实现");
+  if ((b1 & 0x7F) != 96) fail("视频 RTP 载荷类型不是 96");
+  const bool has_extension = (b0 & 0x10) != 0;
+  const uint8_t csrc_count = b0 & 0x0F;
+  const bool marker = (b1 & 0x80) != 0;
+  const uint16_t sequence = be16(packet + 2);
+  const uint32_t timestamp = be32(packet + 4);
+  const uint32_t ssrc = be32(packet + 8);
+
+  size_t header = 12 + 4 * csrc_count;
+  if (header >= size) fail("视频 RTP 的 CSRC 截断或缺少载荷");
+  if (has_extension) {
+    if (header + 4 >= size) fail("视频 RTP 扩展头截断");
+    const uint16_t profile = be16(packet + header);
+    const uint16_t extension_length = be16(packet + header + 2);
+    if ((profile & 1) != 1) fail("视频 RTP 扩展 profile 最低位不是 1");
+    header += 4 + extension_length;
+    if (header >= size) fail("视频 RTP 扩展截断或缺少载荷");
+  }
+
+  if (last_sequence_ >= 0) {
+    const uint16_t expected = last_sequence_ == kLastSequence ? 0 : static_cast<uint16_t>(last_sequence_ + 1);
+    if (sequence != expected) fail("视频 RTP 序号不连续（丢包或重复）");
+  }
+  if (stream_ssrc_ >= 0 && ssrc != static_cast<uint32_t>(stream_ssrc_)) fail("视频 RTP 的 SSRC 在连接中改变");
+  if (!pes_.empty() && timestamp != pes_timestamp_) fail("同一 PES 内 RTP 时间戳改变");
+
+  const size_t payload_length = size - header;
+  if (pes_.size() + payload_length > kMaxPacket) fail("未完成的 PES 超过 10MiB");
+  if (pes_.empty()) {
+    pes_first_sequence_ = sequence;
+    pes_timestamp_ = timestamp;
+  }
+  last_sequence_ = sequence;
+  stream_ssrc_ = ssrc;
+  pes_.insert(pes_.end(), packet + header, packet + size);
+  ++packets_received_;
+  if (marker) deliver();
+}
+
+void VideoDepacketizer::deliver() {
+  const size_t n = pes_.size();
+  if (n < 14 || pes_[0] != 0 || pes_[1] != 0 || pes_[2] != 1) fail("视频 PES 头截断或起始码错误");
+  const uint16_t declared = be16(pes_.data() + 4);
+  if (declared != 0 && static_cast<size_t>(declared) + 6 != n) fail("视频 PES 声明长度与实际不符");
+  const uint8_t flags = pes_[7];
+  if (pes_[6] != 0x84 || (flags & 0x80) == 0) fail("视频 PES 标志不是 0x84 或缺少 PTS");
+  const uint64_t pts = ((static_cast<uint64_t>(pes_[9]) & 0x06) << 29) |
+                       ((static_cast<uint64_t>(pes_[10]) & 0xFF) << 22) |
+                       ((static_cast<uint64_t>(pes_[11]) & 0xFE) << 14) |
+                       ((static_cast<uint64_t>(pes_[12]) & 0xFF) << 7) |
+                       ((static_cast<uint64_t>(pes_[13]) & 0xFE) >> 1);
+  const uint8_t header_data = pes_[8];
+  size_t es_offset = 14;
+  if ((flags & 1) != 0 && header_data > 0) {
+    if (header_data == 1 || n <= 14 || pes_[14] != 0x8E) fail("视频 PES 扩展长度或 0x8e 标识错误");
+    es_offset = 15 + header_data;
+  }
+  if (es_offset + 16 >= n) fail("视频 PES 缺少完整 IV 或 ES 为空");
+  const size_t cipher_start = es_offset + 16;
+  const size_t es_length = n - cipher_start;
+  es_.resize(es_length);
+  const auto decrypted = dmsdp::aes128_ctr_crypt(key_.data(), pes_.data() + es_offset,
+                                                 pes_.data() + cipher_start, es_length);
+  std::copy(decrypted.begin(), decrypted.end(), es_.begin());
+
+  AccessUnit unit;
+  unit.data = es_.data();
+  unit.size = es_length;
+  unit.rtp_timestamp = pes_timestamp_;
+  unit.pts_90k = pts;
+  unit.first_sequence = pes_first_sequence_;
+  unit.last_sequence = last_sequence_ >= 0 ? static_cast<uint16_t>(last_sequence_) : 0;
+  if (sink_) sink_(unit);
+  ++frames_delivered_;
+  pes_.clear();
+}
+
+void VideoDepacketizer::finish() {
+  if (failed_) throw std::runtime_error("视频流已经失败");
+  if (pending_offset_ != 0 || !pending_.empty()) fail("视频连接结束时仍有未收完的 RTP 包");
+  if (!pes_.empty()) fail("视频连接结束时 PES 缺少结尾 marker");
+}
+
+}  // namespace hisight
+}  // namespace hicar

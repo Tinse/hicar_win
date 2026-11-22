@@ -1,0 +1,31 @@
+# CMake / MSVC build output
+/hicar-receiver/build/
+/build/
+/out/
+/.vs/
+*.user
+*.suo
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+
+# Runtime artifacts
+*.log
+*.err
+*.tmp
+
+# Local reference checkouts (third-party repositories)
+/ref/
+
+# Packaged binaries
+/dist/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
