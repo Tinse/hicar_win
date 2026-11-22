@@ -185,8 +185,19 @@ bool start_hotspot(const HotspotConfig& config, HotspotInfo* info, std::string* 
 
     const auto state = manager.TetheringOperationalState();
     if (state == TetheringOperationalState::On) {
-      if (error != nullptr) *error = "热点已在运行（不是本进程启动，不会接管）";
-      return false;
+      // 上一次异常退出/换进程后热点还在：先停掉，等系统真正关闭后再重配，避免“已在运行”。
+      auto stop = manager.StopTetheringAsync();
+      if (stop.wait_for(std::chrono::seconds(10)) !=
+          winrt::Windows::Foundation::AsyncStatus::Completed) {
+        if (error != nullptr) *error = "关闭遗留热点超时（系统未响应）";
+        return false;
+      }
+      stop.get();
+      for (int attempt = 0; attempt < 20; ++attempt) {
+        if (manager.TetheringOperationalState() != TetheringOperationalState::On) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      }
+      std::printf("[热点] 已关闭遗留热点并重新配置\n");
     }
 
     auto access_point = manager.GetCurrentAccessPointConfiguration();

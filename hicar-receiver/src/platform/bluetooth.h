@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -53,6 +54,28 @@ class RfcommListener {
 
 // 车机蓝牙地址文本（大写、冒号分隔）。
 std::string format_bluetooth_address(const std::array<uint8_t, 6>& address);
+
+// HiCar 的 BLE 发现广播（FDEE service data）。真实车机先靠这条广播让手机
+// 在 HiCar 里弹窗，二维码只是 BLE 不可用时的兜底。广播失败不阻塞 RFCOMM。
+class BleAdvertiser {
+ public:
+  BleAdvertiser();
+  BleAdvertiser(BleAdvertiser&& other) noexcept;
+  BleAdvertiser& operator=(BleAdvertiser&& other) noexcept;
+  ~BleAdvertiser();
+  BleAdvertiser(const BleAdvertiser&) = delete;
+  BleAdvertiser& operator=(const BleAdvertiser&) = delete;
+
+  // model4 是“车型 3 字节 + 子型号 1 字节”，sequence 每轮加一。
+  bool start(const std::array<uint8_t, 4>& model4, uint8_t sequence, const std::string& local_name,
+             std::string* error);
+  void stop();
+  bool running() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 }  // namespace platform
 }  // namespace hicar

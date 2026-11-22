@@ -77,8 +77,28 @@ void Receiver::refresh_device_id() {
   device_id_ = device_id_hex(derive_device_id(config_.host.model_id, config_.host.sub_model_id, address));
 }
 
+void Receiver::refresh_pairing_code() {
+  std::random_device device;
+  const uint32_t value = 100000 + device() % 900000;
+  pin_code_ = std::to_string(value);
+  pairing_qr_text_ = "hicar://car/connect?devicename=HiCar-Windows&moduleid=000480&submoduleid=00&mac=" +
+                     platform::format_bluetooth_address(*config_.bluetooth_address) + "&ability=4&pin=" +
+                     pin_code_;
+  pairing_pin_expires_ms_ = now_millis() + 120000;  // 与 HiCar 车机一致：连接码 2 分钟有效
+  std::printf("  连接码已刷新：%s（2 分钟内有效）\n", pin_code_.c_str());
+  std::printf("  二维码内容：%s\n", pairing_qr_text_.c_str());
+  if (qr_window_ != nullptr) {
+    std::string image_path;
+    std::string error;
+    if (!qr_window_->show(pairing_qr_text_, pin_code_, &image_path, &error)) {
+      std::fprintf(stderr, "[配对] 二维码刷新失败：%s\n", error.c_str());
+    }
+  }
+}
+
 Receiver::~Receiver() {
   std::string ignored;
+  ble_advertiser_.stop();
   if (qr_window_ != nullptr) qr_window_->close();
   if (hotspot_active_) platform::stop_hotspot(&ignored);
   if (config_.link == NearbyLink::kBluetooth) platform::set_discoverable(false, &ignored);
@@ -93,7 +113,10 @@ bool Receiver::start(std::string* error) {
   if (config_.link == NearbyLink::kBluetooth) {
     auto radio = platform::find_first_radio(error);
     if (!radio.has_value()) return false;
-    if (!config_.bluetooth_address.has_value()) config_.bluetooth_address = radio->bytes;
+    // 蓝牙链路必须用本机真实 radio 地址：二维码里的 mac、deviceId 派生和 RFCOMM
+    // 监听都要一致。之前默认参数 02:12:34:56:78:9A 会覆盖真实地址，手机照着
+    // 二维码去连一个不存在的 MAC，表现就是扫码后一直连不上。
+    config_.bluetooth_address = radio->bytes;
     refresh_device_id();
     bt_local_address_ = radio->address;
 
@@ -106,12 +129,7 @@ bool Receiver::start(std::string* error) {
     std::printf("  本机 deviceId：%s\n", device_id_.c_str());
 
     // 本次配对用的 6 位连接码；二维码内容是手机扫码后直接连蓝牙的参数。
-    std::random_device device;
-    const uint32_t value = 100000 + device() % 900000;
-    pin_code_ = std::to_string(value);
-    pairing_qr_text_ = "hicar://car/connect?devicename=HiCar-Windows&mac=" +
-                       platform::format_bluetooth_address(radio->bytes) + "&moduleid=" + "000480" +
-                       "&submoduleid=" + "00" + "&pin=" + pin_code_ + "&ability=4";
+    refresh_pairing_code();
     std::printf("  连接码：%s\n", pin_code_.c_str());
     std::printf("  二维码内容：%s\n", pairing_qr_text_.c_str());
 
@@ -119,6 +137,17 @@ bool Receiver::start(std::string* error) {
     if (!platform::set_discoverable(true, &bt_error)) {
       std::fprintf(stderr, "[配对] 蓝牙可发现设置失败（不影响已启动的 RFCOMM 监听）：%s\n",
                    bt_error.c_str());
+    }
+
+    std::array<uint8_t, 4> model4{};
+    for (size_t i = 0; i < model4.size() - 1; ++i) model4[i] = config_.host.model_id[i];
+    model4[3] = config_.host.sub_model_id;
+    std::random_device ble_device;
+    std::string ble_error;
+    if (ble_advertiser_.start(model4, static_cast<uint8_t>(ble_device() & 0xFF), "HiCar-Windows", &ble_error)) {
+      std::printf("  BLE 发现广播已开：FDEE service data（手机 HiCar 应能直接弹窗）\n");
+    } else {
+      std::fprintf(stderr, "[配对] BLE 广播未启动（仍可用二维码）：%s\n", ble_error.c_str());
     }
 
     qr_window_ = std::make_unique<platform::QrWindow>();
@@ -318,7 +347,6 @@ void Receiver::accept_control_rfcomm() {
     return;
   }
   std::puts("[蓝牙] 手机已连接 RFCOMM 控制通道");
-  if (qr_window_ != nullptr) qr_window_->close();
   add_control(std::move(*accepted), NearbyLink::kBluetooth);
 }
 
@@ -333,9 +361,17 @@ void Receiver::start_wifi_stage() {
   platform::HotspotInfo info;
   std::string error;
   if (!platform::start_hotspot(config, &info, &error)) {
-    std::fprintf(stderr, "[无线] 热点启动失败：%s\n", error.c_str());
-    wifi_stage_started_ = false;
-    return;
+    // 上次进程异常退出可能留下热点；接管前先关掉旧热点再重开，避免“已在运行”死锁。
+    if (error.find("已在运行") != std::string::npos) {
+      std::string stop_error;
+      platform::stop_hotspot(&stop_error);
+      std::printf("[无线] 已清理遗留热点，重新启动\n");
+    }
+    if (!platform::start_hotspot(config, &info, &error)) {
+      std::fprintf(stderr, "[无线] 热点启动失败：%s\n", error.c_str());
+      wifi_stage_started_ = false;
+      return;
+    }
   }
   hotspot_ = info;
   hotspot_active_ = true;
@@ -1146,6 +1182,8 @@ void Receiver::handle_auth_outputs(DataConnection& connection,
         break;
       case auth::AuthOutput::Kind::Succeeded:
         auth_session_key_ = output.session_key;
+        ble_advertiser_.stop();
+        if (qr_window_ != nullptr) qr_window_->close();
         std::printf("[业务 19] 认证成功：%s，会话密钥 %zu 字节已保存\n",
                     output.note.c_str(), output.session_key.size());
         if (config_.link == NearbyLink::kBluetooth && !wifi_stage_started_) {
@@ -1266,6 +1304,11 @@ void Receiver::process_hisight_actions(HisightConnection& connection,
       case hisight::HsAction::Kind::kStreamNegotiated: {
         connection.decoder = std::make_unique<platform::MfH264Decoder>(
             [&connection](const uint8_t* bgra, int width, int height) {
+              ++connection.video_frames;
+              if (connection.video_frames == 1 || connection.video_frames % 30 == 0) {
+                std::printf("[HiSight] 解码帧 %llu（%dx%d）\n",
+                            static_cast<unsigned long long>(connection.video_frames), width, height);
+              }
               if (connection.window) connection.window->set_frame(bgra, width, height);
             });
         std::string decode_error;
@@ -1356,6 +1399,12 @@ void Receiver::service_hisight(HisightConnection& connection) {
           close_hisight(connection, false);
         }
       } else {
+        connection.video_total += *got;
+        if (connection.video_total <= static_cast<size_t>(*got) ||
+            connection.video_total / (1024 * 1024) != (connection.video_total - *got) / (1024 * 1024)) {
+          std::printf("[HiSight] 视频已收 %zu 字节，解码帧 %llu\n", connection.video_total,
+                      static_cast<unsigned long long>(connection.video_frames));
+        }
         try {
           connection.receiver->feed_video(buffer, *got);
         } catch (const std::exception& e) {
@@ -1426,6 +1475,20 @@ void Receiver::tick() {
                                   return connection->closing;
                                 }),
                  hisight_.end());
+
+  // 连接码 2 分钟过期后刷新二维码；但只要有控制/数据连接正在握手，就不能换 PIN，
+  // 否则手机手里还是旧码，PAKE 必然失败。等连接结束后下一轮再刷新。
+  bool busy = false;
+  for (const auto& connection : controls_) {
+    if (connection->socket.valid()) busy = true;
+  }
+  for (const auto& connection : data_connections_) {
+    if (connection->socket.valid()) busy = true;
+  }
+  if (!busy && !auth_session_key_.has_value() && qr_window_ != nullptr &&
+      qr_window_->visible() && now >= pairing_pin_expires_ms_) {
+    refresh_pairing_code();
+  }
 }
 
 uint64_t Receiver::now_millis() {

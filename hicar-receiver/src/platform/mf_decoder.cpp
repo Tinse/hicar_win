@@ -94,9 +94,13 @@ bool MfH264Decoder::open(int width, int height, int fps, std::string* error) {
   }
   VariantClear(&low_latency);
 
-  transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-  transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
   transform_ = transform.Detach();
+  // 尽量在首帧前把输出类型定成 NV12/YV12；部分驱动要等 SPS 后才会给类型，
+  // 这里失败也没关系，ProcessOutput 返回 STREAM_CHANGE 时会再配置一次。
+  configure_output();
+
+  transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
   return true;
 }
 
@@ -149,33 +153,45 @@ bool MfH264Decoder::decode(const uint8_t* data, size_t size, uint64_t pts_90k) {
 
   for (int attempt = 0; attempt < 8; ++attempt) {
     MFT_OUTPUT_STREAM_INFO info{};
-    transform_->GetOutputStreamInfo(0, &info);
+    if (FAILED(transform_->GetOutputStreamInfo(0, &info))) break;
+    const bool provides_samples = (info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
     ComPtr<IMFSample> output;
-    ComPtr<IMFMediaBuffer> output_buffer;
-    if (FAILED(MFCreateSample(&output))) return false;
-    const DWORD buffer_size = info.cbSize > 0
-                                  ? info.cbSize
-                                  : static_cast<DWORD>(std::max(1, width_ * height_) * 3 / 2);
-    if (FAILED(MFCreateMemoryBuffer(buffer_size, &output_buffer))) return false;
-    output->AddBuffer(output_buffer.Get());
-
     MFT_OUTPUT_DATA_BUFFER output_data{};
     output_data.dwStreamID = 0;
-    output_data.pSample = output.Get();
+    if (!provides_samples) {
+      ComPtr<IMFMediaBuffer> output_buffer;
+      if (FAILED(MFCreateSample(&output))) return false;
+      const DWORD buffer_size = info.cbSize > 0
+                                    ? info.cbSize
+                                    : static_cast<DWORD>(std::max(1, width_ * height_) * 3 / 2);
+      if (FAILED(MFCreateMemoryBuffer(buffer_size, &output_buffer))) return false;
+      output->AddBuffer(output_buffer.Get());
+      output_data.pSample = output.Get();
+    }
     DWORD status = 0;
     hr = transform_->ProcessOutput(0, 1, &output_data, &status);
     if (output_data.pEvents != nullptr) output_data.pEvents->Release();
     if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+      if (output_data.pSample != nullptr && provides_samples) output_data.pSample->Release();
       if (!configure_output()) return false;
       continue;
     }
-    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT || hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+      if (output_data.pSample != nullptr && provides_samples) output_data.pSample->Release();
       break;
     }
-    if (FAILED(hr)) break;
+    if (FAILED(hr)) {
+      if (output_data.pSample != nullptr && provides_samples) output_data.pSample->Release();
+      break;
+    }
 
+    IMFSample* sample = provides_samples ? output_data.pSample : output.Get();
+    if (sample == nullptr) continue;
     IMFMediaBuffer* decoded = nullptr;
-    if (FAILED(output->GetBufferByIndex(0, &decoded))) continue;
+    if (FAILED(sample->GetBufferByIndex(0, &decoded)) || decoded == nullptr) {
+      if (provides_samples) sample->Release();
+      continue;
+    }
     BYTE* raw = nullptr;
     DWORD length = 0;
     if (SUCCEEDED(decoded->Lock(&raw, nullptr, &length))) {
@@ -183,6 +199,7 @@ bool MfH264Decoder::decode(const uint8_t* data, size_t size, uint64_t pts_90k) {
       decoded->Unlock();
     }
     decoded->Release();
+    if (provides_samples) sample->Release();
     break;
   }
   return true;

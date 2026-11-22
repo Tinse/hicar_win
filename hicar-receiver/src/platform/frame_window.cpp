@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 namespace hicar {
 namespace platform {
@@ -11,8 +12,15 @@ namespace {
 
 constexpr const wchar_t* kWindowClass = L"HiCarProjectionWindow";
 
-ATOM register_class(HINSTANCE instance) {
-  static ATOM atom = 0;
+std::wstring utf8_to_wide(const std::string& text) {
+  if (text.empty()) return {};
+  const int chars = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+  std::wstring out(static_cast<size_t>(chars), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), chars);
+  return out;
+}
+
+ATOM register_class(HINSTANCE instance) {  static ATOM atom = 0;
   if (atom != 0) return atom;
   WNDCLASSEXW cls{};
   cls.cbSize = sizeof(cls);
@@ -75,7 +83,7 @@ bool FrameWindow::create(int width, int height, const std::string& title, std::s
   }
   RECT rect{0, 0, width, height};
   AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-  hwnd_ = CreateWindowExW(0, kWindowClass, std::wstring(title.begin(), title.end()).c_str(),
+  hwnd_ = CreateWindowExW(0, kWindowClass, utf8_to_wide(title).c_str(),
                           WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                           rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr, instance,
                           this);

@@ -190,25 +190,26 @@ std::vector<AuthOutput> AuthSession::on_handshake(const JsonValue& root, const s
   handshake_seen_ = true;
   peer_device_id_ = *device_id;
 
-  std::optional<Bytes> pin;
-  if (*has_pin) {
-    pin = config_.pin;
-    if (!pin.has_value()) {
-      const Bytes raw = random_.bytes(4);
-      const uint32_t value = (static_cast<uint32_t>(raw[0]) << 24) |
-                             (static_cast<uint32_t>(raw[1]) << 16) |
-                             (static_cast<uint32_t>(raw[2]) << 8) | raw[3];
-      char text[8];
-      std::snprintf(text, sizeof(text), "%06u", static_cast<unsigned>(value % 1000000u));
-      pin = Bytes(text, text + 6);
-    }
+  // has_pin 描述的是“手机是否还需要车机给出连接码”，不是“本机有没有连接码”。
+  // 扫码连接时手机已经从二维码拿到 PIN，会发 has_pin=false；此时仍必须用本机
+  // 保存的同一个 PIN 走 PAKE，不能误判成免码回连。只有既没有 PIN、又没有配对
+  // 记录时，才真正无法认证。
+  std::optional<Bytes> pin = config_.pin;
+  if (!pin.has_value() && *has_pin) {
+    const Bytes raw = random_.bytes(4);
+    const uint32_t value = (static_cast<uint32_t>(raw[0]) << 24) |
+                           (static_cast<uint32_t>(raw[1]) << 16) |
+                           (static_cast<uint32_t>(raw[2]) << 8) | raw[3];
+    char text[8];
+    std::snprintf(text, sizeof(text), "%06u", static_cast<unsigned>(value % 1000000u));
+    pin = Bytes(text, text + 6);
   }
   active_pin_ = pin;
 
   auth_config_.peer_auth_id.assign(peer_device_id_.begin(), peer_device_id_.end());
   auth_config_.pin = pin;
   authenticator_ = std::make_unique<AccessoryAuthenticator>(auth_config_, store_, random_);
-  mode_ = *has_pin ? 1 : 2;
+  mode_ = pin.has_value() ? 1 : 2;
 
   AuthOutput note;
   note.kind = AuthOutput::Kind::Note;
@@ -217,13 +218,18 @@ std::vector<AuthOutput> AuthSession::on_handshake(const JsonValue& root, const s
               "，本机有配对记录=" + (authenticator_->peer_trusted() ? "true" : "false");
   outputs.push_back(std::move(note));
 
-  if (!*has_pin && !authenticator_->peer_trusted()) {
+  if (!pin.has_value() && !authenticator_->peer_trusted()) {
     finished_ = true;
     outputs.push_back(failure(-1));
     return outputs;
   }
 
-  const std::string info = string_map_json(config_.device_info);
+  std::vector<std::pair<std::string, std::string>> details = config_.device_info;
+  details.emplace_back("deviceId", std::string(auth_config_.self_auth_id.begin(),
+                                               auth_config_.self_auth_id.end()));
+  details.emplace_back("devicename", "HiCar-Windows");
+  details.emplace_back("has_pin", pin.has_value() ? "true" : "false");
+  const std::string info = string_map_json(details);
   std::string response = envelope_head(config_.envelope_version, 1, info);
   response += ",\"usb_connection\":";
   response += config_.usb_connection ? "true" : "false";

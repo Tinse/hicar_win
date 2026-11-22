@@ -296,6 +296,44 @@ void test_wired_auth_session(const std::string& path) {
   check(session.finished(), "认证完成后会话应结束");
 }
 
+void test_qr_handshake() {
+  hicar::auth::MemoryTrustStore store;
+  hicar::auth::SequenceRandom random("qr-test");
+  hicar::auth::AuthSessionConfig config;
+  config.envelope_version = "A_3@20200617200000";
+  config.usb_connection = false;
+  config.pin = hicar::auth::Bytes{'5', '9', '4', '3', '1', '9'};
+  config.device_info = {{"CAR_MODE_ID", "00048000"}};
+
+  hicar::auth::AccessoryAuthConfig base;
+  base.service_package = "com.huawei.authagent";
+  base.service_type = "SFXTEST";
+  const std::string car_id = "04087588BAD2D658D0F40950FAAB995C6EFF86BC0996284DAD7543B80A2B174A";
+  base.self_auth_id.assign(car_id.begin(), car_id.end());
+
+  hicar::auth::AuthSession session(config, base, store, random);
+  const std::string handshake =
+      "{\"version\":\"A_3@20200617200000\",\"discover_type\":1,\"oper_type\":1,\"data\":\"{\\\"deviceId\\\":\\\""
+      "0797EB5AC4BDE02B\\\",\\\"has_pin\\\":false,\\\"usb_connection\\\":false}\"}";
+  const auto outputs = session.feed(handshake);
+
+  bool sent = false;
+  bool failed = false;
+  for (const auto& output : outputs) {
+    if (output.kind == hicar::auth::AuthOutput::Kind::Failed) failed = true;
+    if (output.kind == hicar::auth::AuthOutput::Kind::Send) {
+      sent = true;
+      const std::string text(output.bytes.begin(), output.bytes.end());
+      check(text.find("has_pin\\\":\\\"true") != std::string::npos,
+            "扫码握手应答应声明车机侧 has_pin=true");
+      check(text.find("deviceId") != std::string::npos, "握手应答应带本机 deviceId");
+      check(text.find("\"pin_code\"") == std::string::npos, "无线扫码应答不应泄露 pin_code");
+    }
+  }
+  check(!failed, "扫码 has_pin=false + 本机有 PIN 时不应拒绝");
+  check(sent, "扫码握手应继续回一条应答");
+}
+
 }  // namespace
 
 int main() {
@@ -304,6 +342,7 @@ int main() {
   test_pair_and_sts(path);
   test_wrong_pin(path);
   test_wired_auth_session(path);
+  test_qr_handshake();
 
   if (g_failures != 0) {
     std::fprintf(stderr, "%d 项失败\n", g_failures);

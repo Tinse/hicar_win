@@ -4,6 +4,11 @@
 #include <bluetoothapis.h>
 #include <windows.h>
 
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
+#include <winrt/Windows.Storage.Streams.h>
+
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -311,6 +316,71 @@ bool RfcommListener::publish_sdp(std::string* error) {
   }
   return true;
 }
+
+struct BleAdvertiser::Impl {
+  winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementPublisher publisher{nullptr};
+  bool running = false;
+};
+
+BleAdvertiser::BleAdvertiser() : impl_(std::make_unique<Impl>()) {}
+BleAdvertiser::BleAdvertiser(BleAdvertiser&& other) noexcept = default;
+BleAdvertiser& BleAdvertiser::operator=(BleAdvertiser&& other) noexcept = default;
+BleAdvertiser::~BleAdvertiser() { stop(); }
+
+bool BleAdvertiser::start(const std::array<uint8_t, 4>& model4, uint8_t sequence,
+                          const std::string& local_name, std::string* error) {
+  if (error != nullptr) error->clear();
+  try {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    stop();
+
+    // FDEE service data（11 字节 + 16 位 UUID）：手机 HiCar 用它识别“车机正在等待连接”。
+    // 格式来自真实接收端实现：01 01 01 03 <model0..2> 04 <model3> 10 <seq>。
+    const std::array<uint8_t, 13> data = {0xEE, 0xFD, 0x01, 0x01, 0x01, 0x03,
+                                         model4[0], model4[1], model4[2], 0x04, model4[3],
+                                         0x10, sequence};
+
+    auto publisher =
+        winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementPublisher();
+    auto advertisement = publisher.Advertisement();
+    // 先不写 LocalName：部分 Windows 蓝牙栈对广播里的本地名长度/编码很挑，
+    // 发现阶段只用 FDEE service data，名字留给 SDP。
+    (void)local_name;
+
+    auto section =
+        winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementDataSection();
+    section.DataType(0x16);  // Bluetooth SIG “Service Data - 16-bit UUID”
+    auto writer = winrt::Windows::Storage::Streams::DataWriter();
+    writer.WriteBytes(data);
+    section.Data(writer.DetachBuffer());
+    advertisement.DataSections().Append(section);
+
+    publisher.Start();
+    impl_->publisher = publisher;
+    impl_->running = true;
+    return true;
+  } catch (const winrt::hresult_error& e) {
+    if (error != nullptr) {
+      *error = "BLE 广播失败：" + winrt::to_string(e.message()) +
+               "（0x" + std::to_string(static_cast<unsigned>(e.code())) + "）";
+    }
+  } catch (const std::exception& e) {
+    if (error != nullptr) *error = std::string("BLE 广播失败：") + e.what();
+  }
+  return false;
+}
+
+void BleAdvertiser::stop() {
+  if (!impl_ || !impl_->running) return;
+  try {
+    impl_->publisher.Stop();
+  } catch (...) {
+  }
+  impl_->publisher = nullptr;
+  impl_->running = false;
+}
+
+bool BleAdvertiser::running() const { return impl_ && impl_->running; }
 
 }  // namespace platform
 }  // namespace hicar

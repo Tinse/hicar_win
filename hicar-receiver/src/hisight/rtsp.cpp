@@ -51,7 +51,7 @@ bool RtspMessage::is_text_parameters() const {
   if (it == headers.end()) return false;
   std::string value;
   for (char c : it->second) value.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-  return value == kTextParameters;
+  return value.rfind(kTextParameters, 0) == 0;  // 允许 text/parameters;charset=...
 }
 
 void ControlFrameDecoder::append(const uint8_t* data, size_t size) {

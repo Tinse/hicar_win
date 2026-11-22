@@ -98,6 +98,8 @@ class Receiver {
     std::unique_ptr<platform::FrameWindow> window;
     std::string phone_ip;
     uint32_t port = 0;
+    size_t video_total = 0;
+    uint64_t video_frames = 0;
     bool closing = false;
   };
 
@@ -136,6 +138,7 @@ class Receiver {
   void close_hisight(HisightConnection& connection, bool send_teardown);
   void tick();
   void refresh_device_id();
+  void refresh_pairing_code();
   static uint64_t now_millis();
 
   ReceiverConfig config_;
@@ -152,12 +155,14 @@ class Receiver {
   std::unique_ptr<platform::AudioPlayer> audio_player_;
   std::unique_ptr<platform::AppWindow> app_window_;
   std::unique_ptr<platform::QrWindow> qr_window_;
+  platform::BleAdvertiser ble_advertiser_;
   std::shared_ptr<dmsdp::DmsdpSession> app_dmsdp_;
   bool app_list_requested_ = false;
   bool foreground_registered_ = false;
   std::string device_id_;
   std::string pin_code_;
   std::string pairing_qr_text_;
+  uint64_t pairing_pin_expires_ms_ = 0;
   auth::MemoryTrustStore trust_store_{"hicar_trust.json"};
   auth::SystemRandom auth_random_;
   std::optional<auth::Bytes> auth_session_key_;

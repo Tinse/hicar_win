@@ -1,6 +1,7 @@
 #include "hisight/receiver.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <iterator>
 #include <random>
 #include <stdexcept>
@@ -108,7 +109,11 @@ std::vector<HsAction> HisightReceiver::feed_control(const uint8_t* data, size_t 
                                                         payload.size() - 16);
         plain.assign(decrypted.begin(), decrypted.end());
       }
-      const auto actions = handle(parse_rtsp(plain), wall_clock_millis);
+      const auto parsed = parse_rtsp(plain);
+      std::fprintf(stderr, "[HiSight RX] %s | CSeq=%d | CT=%s | body=%u\n", parsed.first_line.c_str(),
+                   parsed.cseq, parsed.header("content-type").value_or("<none>").c_str(),
+                   static_cast<unsigned>(parsed.body.size()));
+      const auto actions = handle(parsed, wall_clock_millis);
       out.insert(out.end(), actions.begin(), actions.end());
     }
   } catch (...) {
@@ -135,6 +140,7 @@ std::vector<HsAction> HisightReceiver::handle_response(const RtspMessage& messag
   if (it == pending_.end()) fail("手机应答的 CSeq 对不上待应答请求");
   const std::string pending = it->second;
   pending_.erase(it);
+  if (pending == "ANNOUNCE") return {};  // 车机发出的加密协商，手机回 200 OK 即可
   if (pending == "SETUP") return handle_setup_response(message);
   if (pending == "PLAY") {
     HsAction action;
@@ -147,7 +153,17 @@ std::vector<HsAction> HisightReceiver::handle_response(const RtspMessage& messag
 
 std::vector<HsAction> HisightReceiver::handle_announce(const RtspMessage& message,
                                                       uint64_t wall_clock_millis) {
-  if (crypto_ready_ || !message.is_text_parameters()) fail("ANNOUNCE 重复或类型不是 text/parameters");
+  if (crypto_ready_) fail("ANNOUNCE 重复");
+  // HarmonyOS 7 会在车机 ANNOUNCE 的 200 之后，再发一个无正文的空 ANNOUNCE 探针；
+  // 这是合法握手的一部分，只回 200，不当作加密选择。
+  if (message.body.empty()) {
+    std::vector<HsAction> out;
+    out.push_back(send_control(rtsp_ok(message.cseq, rtsp_date(wall_clock_millis))));
+    // HarmonyOS 7 的空 ANNOUNCE 等价于“接受车机声明的 aes128ctr”，应答后立即切加密。
+    crypto_ready_ = true;
+    return out;
+  }
+  if (!message.is_text_parameters()) fail("ANNOUNCE 类型不是 text/parameters");
   const std::string text(message.body.begin(), message.body.end());
   if (text.size() < 2 || text.compare(text.size() - 2, 2, "\r\n") != 0) fail("加密选择必须是单独一行");
   size_t crlf = text.find("\r\n");

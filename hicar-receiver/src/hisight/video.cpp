@@ -75,7 +75,11 @@ void VideoDepacketizer::process_packet(const uint8_t* packet, size_t size) {
     const uint16_t profile = be16(packet + header);
     const uint16_t extension_length = be16(packet + header + 2);
     if ((profile & 1) != 1) fail("视频 RTP 扩展 profile 最低位不是 1");
-    header += 4 + extension_length;
+    // RTP 扩展头的 length 单位是 32-bit word，不是字节；少乘 4 会把扩展内容
+    // 当成 H.264 载荷，PES 随即损坏，表现就是一直黑屏。
+    const size_t extension_bytes = static_cast<size_t>(extension_length) * 4;
+    if (extension_bytes > size - header - 4) fail("视频 RTP 扩展长度越界");
+    header += 4 + extension_bytes;
     if (header >= size) fail("视频 RTP 扩展截断或缺少载荷");
   }
 

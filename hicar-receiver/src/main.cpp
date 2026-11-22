@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <array>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "nearby/car_info.h"
 #include "platform/app_window.h"
 #include "platform/audio_player.h"
+#include "platform/bluetooth.h"
 
 namespace {
 
@@ -33,6 +35,7 @@ struct Options {
   bool serve = false;
   bool phone_sim = false;
   bool bt_info = false;
+  bool ble_test = false;
   bool app_demo = false;
   bool audio_demo = false;
   int seconds = 60;
@@ -62,6 +65,8 @@ void usage() {
       "      本机模拟手机端跑一遍握手与建 socket，用于自测\n"
       "  hicar_receiver --bt-info [--seconds 60]\n"
       "      打印蓝牙地址，开 RFCOMM 监听并发布 SDP（UUID FE35），等待连接\n"
+      "  hicar_receiver --ble-test [--seconds 8]\n"
+      "      只发 FDEE BLE 发现广播，用来确认手机 HiCar 是否能发现本机\n"
       "  hicar_receiver --app-demo [--seconds 8]\n"
       "      打开应用中心界面预览（华为视频 / 华为音乐固定入口）\n"
       "  hicar_receiver --audio-demo [--seconds 2]\n"
@@ -105,6 +110,8 @@ int main(int argc, char** argv) {
       opt.phone_sim = true;
     } else if (arg == "--bt-info") {
       opt.bt_info = true;
+    } else if (arg == "--ble-test") {
+      opt.ble_test = true;
     } else if (arg == "--app-demo") {
       opt.app_demo = true;
     } else if (arg == "--audio-demo") {
@@ -190,6 +197,29 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (opt.ble_test) {
+    const auto model = hicar::from_hex(opt.model);
+    const auto sub = hicar::from_hex(opt.sub);
+    if (model.size() != 3 || sub.size() != 1) {
+      std::fputs("model / sub 长度不对\n", stderr);
+      return 2;
+    }
+    std::array<uint8_t, 4> model4{};
+    std::memcpy(model4.data(), model.data(), 3);
+    model4[3] = sub[0];
+    hicar::platform::BleAdvertiser advertiser;
+    std::string error;
+    if (!advertiser.start(model4, 0, "HiCar-Windows", &error)) {
+      std::fprintf(stderr, "BLE 广播启动失败：%s\n", error.c_str());
+      return 1;
+    }
+    std::printf("BLE FDEE 广播已启动 %d 秒，手机 HiCar 里应能看到/弹窗\n", opt.seconds);
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::seconds(opt.seconds));
+    advertiser.stop();
+    return 0;
+  }
+
   if (opt.bt_info) {
     return hicar::run_bluetooth_probe(opt.seconds);
   }
@@ -225,17 +255,24 @@ int main(int argc, char** argv) {
     hicar::CarInfo info;
     std::memcpy(info.model_id.data(), hicar::from_hex(opt.model).data(), 3);
     info.sub_model_id = hicar::from_hex(opt.sub)[0];
-    const auto id = hicar::derive_device_id(info.model_id, info.sub_model_id, bluetooth);
-    const auto id_hex = hicar::device_id_hex(id);
-    info.device_id = {};
-    std::memcpy(info.device_id.data(), id.data(), 32);
-    info.bluetooth_address = bluetooth;
-    info.host_ip = opt.ip;
-    if (receiver.control_port() != 0) {
-      info.port = receiver.control_port();
-      std::printf("carInfo(91 字节): %s\n", hicar::to_hex(info.encode()).c_str());
+    const bool bt_link = opt.link == "bt" || opt.link == "bluetooth";
+    if (bt_link) {
+      // 蓝牙链路在 Receiver::start 里已经用 radio 的真实地址重算了 deviceId；
+      // 这里必须用同一个值，不能再拿 --bt 的默认占位地址算一遍。
+      std::printf("deviceId: %s\n", receiver.device_id().c_str());
+    } else {
+      const auto id = hicar::derive_device_id(info.model_id, info.sub_model_id, bluetooth);
+      const auto id_hex = hicar::device_id_hex(id);
+      info.device_id = {};
+      std::memcpy(info.device_id.data(), id.data(), 32);
+      info.bluetooth_address = bluetooth;
+      info.host_ip = opt.ip;
+      if (receiver.control_port() != 0) {
+        info.port = receiver.control_port();
+        std::printf("carInfo(91 字节): %s\n", hicar::to_hex(info.encode()).c_str());
+      }
+      std::printf("deviceId: %s\n", id_hex.c_str());
     }
-    std::printf("deviceId: %s\n", id_hex.c_str());
     std::fflush(stdout);
 
     const int code = [&]() {
