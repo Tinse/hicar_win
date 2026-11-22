@@ -92,6 +92,14 @@ void VideoDepacketizer::process_packet(const uint8_t* packet, size_t size) {
   if (!pes_.empty() && timestamp != pes_timestamp_) fail("同一 PES 内 RTP 时间戳改变");
 
   const size_t payload_length = size - header;
+  static int rtp_diag = 0;
+  if (rtp_diag < 3) {
+    std::fprintf(stderr, "[HiSight] RTP b0=%02x b1=%02x csrc=%u ext=%d header=%zu size=%zu payload=%zu first=",
+                 b0, b1, csrc_count, has_extension ? 1 : 0, header, size, payload_length);
+    for (size_t i = 0; i < payload_length && i < 16; ++i) std::fprintf(stderr, "%02x", packet[header + i]);
+    std::fprintf(stderr, "\n");
+    ++rtp_diag;
+  }
   if (pes_.size() + payload_length > kMaxPacket) fail("未完成的 PES 超过 10MiB");
   if (pes_.empty()) {
     pes_first_sequence_ = sequence;
