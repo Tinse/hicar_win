@@ -21,6 +21,7 @@
 #include "platform/frame_window.h"
 #include "platform/hotspot.h"
 #include "platform/mf_decoder.h"
+#include "platform/qr_window.h"
 #include "platform/tcp.h"
 
 namespace hicar {
@@ -150,6 +151,7 @@ class Receiver {
   std::vector<std::unique_ptr<AudioConnection>> audio_connections_;
   std::unique_ptr<platform::AudioPlayer> audio_player_;
   std::unique_ptr<platform::AppWindow> app_window_;
+  std::unique_ptr<platform::QrWindow> qr_window_;
   std::shared_ptr<dmsdp::DmsdpSession> app_dmsdp_;
   bool app_list_requested_ = false;
   bool foreground_registered_ = false;

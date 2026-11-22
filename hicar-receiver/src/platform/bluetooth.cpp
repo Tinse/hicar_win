@@ -169,6 +169,37 @@ std::optional<BluetoothRadioInfo> find_first_radio(std::string* error) {
   return out;
 }
 
+bool set_discoverable(bool enabled, std::string* error) {
+  BLUETOOTH_FIND_RADIO_PARAMS params{};
+  params.dwSize = sizeof(params);
+  HANDLE radio = nullptr;
+  HBLUETOOTH_RADIO_FIND find = BluetoothFindFirstRadio(&params, &radio);
+  if (find == nullptr) {
+    if (error != nullptr) *error = "没有可用的蓝牙无线电（错误码 " + std::to_string(GetLastError()) + "）";
+    return false;
+  }
+
+  const BOOL want = enabled ? TRUE : FALSE;
+  const BOOL discovery = BluetoothEnableDiscovery(radio, want);
+  const DWORD discovery_error = GetLastError();
+  const BOOL incoming = BluetoothEnableIncomingConnections(radio, want);
+  const DWORD incoming_error = GetLastError();
+
+  BluetoothFindRadioClose(find);
+  CloseHandle(radio);
+
+  if (!discovery || !incoming) {
+    if (error != nullptr) {
+      std::string text = enabled ? "开启蓝牙可发现/可连接失败" : "恢复蓝牙可发现/可连接状态失败";
+      text += "（discovery " + std::to_string(discovery_error) + "，incoming " +
+              std::to_string(incoming_error) + "）";
+      *error = text;
+    }
+    return false;
+  }
+  return true;
+}
+
 RfcommListener::RfcommListener(RfcommListener&& other) noexcept
     : handle_(other.handle_), local_address_(other.local_address_), channel_(other.channel_) {
   other.handle_ = TcpSocket::kInvalid;

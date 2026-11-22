@@ -20,6 +20,9 @@ struct BluetoothRadioInfo {
 // 找第一块可用的本地蓝牙无线电。
 std::optional<BluetoothRadioInfo> find_first_radio(std::string* error);
 
+// 把本机蓝牙设为可被发现/可被连接（配对期间需要；失败不阻塞主流程）。
+bool set_discoverable(bool enabled, std::string* error);
+
 // RFCOMM 监听：绑定本地地址与通道号（0 = 自动挑），可发布 SDP 记录。
 class RfcommListener {
  public:

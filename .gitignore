@@ -17,6 +17,8 @@
 *.log
 *.err
 *.tmp
+/pairing_qr.bmp
+/qr_window_capture.png
 
 # Local reference checkouts (third-party repositories)
 /ref/

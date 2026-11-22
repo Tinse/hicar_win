@@ -19,6 +19,10 @@ find_library(HC_LIBCRYPTO_LIBRARY NAMES libcrypto libcrypto-3-x64 HINTS "${HC_OP
 find_path(HC_CPPWINRT_INCLUDE_DIR winrt/Windows.Foundation.h
   HINTS "C:/Program Files (x86)/Windows Kits/10/Include/10.0.22621.0/cppwinrt" REQUIRED)
 
+# 二维码编码（Nayuki QR Code generator，MIT）。
+add_library(qrcodegen STATIC third_party/qrcodegen/qrcodegen.cpp)
+target_include_directories(qrcodegen PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen)
+
 # 协议核心：纯字节处理，不依赖任何平台头文件，可单测。
 add_library(hicar_core STATIC
   src/common/byte_buffer.cpp
@@ -65,13 +69,14 @@ add_executable(hicar_receiver
   src/platform/frame_window.cpp
   src/platform/audio_player.cpp
   src/platform/app_window.cpp
+  src/platform/qr_window.cpp
   src/hisight/rtsp.cpp
   src/hisight/capabilities.cpp
   src/hisight/uibc.cpp
   src/hisight/video.cpp
   src/hisight/receiver.cpp
 )
-target_link_libraries(hicar_receiver PRIVATE hicar_core ws2_32 bthprops iphlpapi wlanapi windowsapp
+target_link_libraries(hicar_receiver PRIVATE hicar_core qrcodegen ws2_32 bthprops iphlpapi wlanapi windowsapp
   mfplat mf mfuuid wmcodecdspuuid ole32 user32 gdi32 winmm)
 target_include_directories(hicar_receiver PRIVATE ${HC_CPPWINRT_INCLUDE_DIR})
 

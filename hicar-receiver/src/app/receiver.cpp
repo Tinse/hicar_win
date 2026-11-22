@@ -79,7 +79,9 @@ void Receiver::refresh_device_id() {
 
 Receiver::~Receiver() {
   std::string ignored;
+  if (qr_window_ != nullptr) qr_window_->close();
   if (hotspot_active_) platform::stop_hotspot(&ignored);
+  if (config_.link == NearbyLink::kBluetooth) platform::set_discoverable(false, &ignored);
 }
 
 bool Receiver::start(std::string* error) {
@@ -112,6 +114,21 @@ bool Receiver::start(std::string* error) {
                        "&submoduleid=" + "00" + "&pin=" + pin_code_ + "&ability=4";
     std::printf("  连接码：%s\n", pin_code_.c_str());
     std::printf("  二维码内容：%s\n", pairing_qr_text_.c_str());
+
+    std::string bt_error;
+    if (!platform::set_discoverable(true, &bt_error)) {
+      std::fprintf(stderr, "[配对] 蓝牙可发现设置失败（不影响已启动的 RFCOMM 监听）：%s\n",
+                   bt_error.c_str());
+    }
+
+    qr_window_ = std::make_unique<platform::QrWindow>();
+    std::string qr_image_path;
+    std::string qr_error;
+    if (qr_window_->show(pairing_qr_text_, pin_code_, &qr_image_path, &qr_error)) {
+      if (!qr_image_path.empty()) std::printf("  二维码图片：%s\n", qr_image_path.c_str());
+    } else {
+      std::fprintf(stderr, "[配对] 二维码窗口打开失败：%s\n", qr_error.c_str());
+    }
     std::fflush(stdout);
     return true;
   }
@@ -301,6 +318,7 @@ void Receiver::accept_control_rfcomm() {
     return;
   }
   std::puts("[蓝牙] 手机已连接 RFCOMM 控制通道");
+  if (qr_window_ != nullptr) qr_window_->close();
   add_control(std::move(*accepted), NearbyLink::kBluetooth);
 }
 
