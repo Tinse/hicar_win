@@ -188,11 +188,11 @@ bool MfH264Decoder::decode(const uint8_t* data, size_t size, uint64_t pts_90k) {
       break;
     }
 
-    IMFSample* sample = provides_samples ? output_data.pSample : output.Get();
-    if (sample == nullptr) continue;
+    IMFSample* output_sample = provides_samples ? output_data.pSample : output.Get();
+    if (output_sample == nullptr) continue;
     IMFMediaBuffer* decoded = nullptr;
-    if (FAILED(sample->GetBufferByIndex(0, &decoded)) || decoded == nullptr) {
-      if (provides_samples) sample->Release();
+    if (FAILED(output_sample->GetBufferByIndex(0, &decoded)) || decoded == nullptr) {
+      if (provides_samples) output_sample->Release();
       continue;
     }
     BYTE* raw = nullptr;
@@ -202,7 +202,7 @@ bool MfH264Decoder::decode(const uint8_t* data, size_t size, uint64_t pts_90k) {
       decoded->Unlock();
     }
     decoded->Release();
-    if (provides_samples) sample->Release();
+    if (provides_samples) output_sample->Release();
     break;
   }
   last_decode_micros_ = static_cast<uint64_t>(

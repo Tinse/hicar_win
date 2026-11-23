@@ -782,7 +782,7 @@ void Receiver::service_dmsdp(DataConnection& connection, const uint8_t* data, si
   }
 }
 
-DataConnection* Receiver::find_dmsdp_connection(
+Receiver::DataConnection* Receiver::find_dmsdp_connection(
     const std::shared_ptr<dmsdp::DmsdpSession>& session, bool control) {
   if (session == nullptr) return nullptr;
   for (auto& candidate : data_connections_) {
