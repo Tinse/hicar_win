@@ -1,7 +1,8 @@
 # HiSight 投屏黑屏闪烁
 
-- 状态：Open
+- 状态：Fixed（已构建/单测通过，待真机复验）
 - 记录日期：2026-11-23
+- 修复提交：`6b31e89` / `32ca70f`
 - 平台：Windows x64 接收端 + Mate 70 Pro / HarmonyOS 7
 - 连接方式：无线（蓝牙扫码 + Windows 热点 + ICS）
 - 视频参数：1280x720 @ 30fps，Media Foundation H.264 硬解，Win32/GDI 窗口显示
@@ -63,3 +64,13 @@
 - 30fps 连续投屏 5 分钟，无可见黑屏闪烁。
 - 窗口拖动、缩放时不出现整窗黑闪。
 - 解码帧数持续增长，视频流错误为 0。
+
+## 已实施修复
+
+- `FrameWindow` 增加兼容 DC + 后台位图；`WM_PAINT` 先把当前帧画到后台缓冲，最后一次
+  `BitBlt` 到窗口，窗口 DC 上不再出现“先填黑再画帧”的中间状态。
+- `WM_ERASEBKGND` 直接返回 1，禁止系统在每帧重绘前擦背景；`WM_SIZE` 只重建后台缓冲。
+- `WM_PAINT` 使用 `SetDIBitsToDevice`（等尺寸）或 `StretchDIBits`（缩放）绘制，并保持
+  letterbox 黑边；`set_frame` 与 `map_point` 加锁，避免解码线程与 UI 线程同时读写帧尺寸。
+- 保留 GDI 路径作为低风险修复；若真机仍有撕裂，再升级 D3D11 flip swap chain。
+

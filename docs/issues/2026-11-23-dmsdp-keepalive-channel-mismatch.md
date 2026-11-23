@@ -1,7 +1,8 @@
 # DMSDP 保活动作投递到错误连接
 
-- 状态：Open
+- 状态：Fixed（已构建/单测通过，待真机复验）
 - 记录日期：2026-11-23
+- 修复提交：`6b31e89` / `32ca70f`
 - 发现场景：HiSight 真机投屏期间
 - 关联日志：`debug_receiver/live.log`、`debug_receiver/live.err`
 
@@ -57,3 +58,16 @@ if (to_control != connection.dmsdp_control) {
 - HiSight 投屏 5 分钟，`[DMSDP] 保活超时` 为 0。
 - 不再出现 `[DMSDP] 发送通道与当前连接不符，丢弃`。
 - 手机关屏/退出 HiCar 时仍能正常结束，不误报保活失败。
+
+## 已实施修复
+
+- `Receiver::find_dmsdp_connection()` 按 `DmsdpSession` 指针 + `dmsdp_control` 查找目标连接。
+- `handle_dmsdp_outputs()` 的 `kSend` 不再按“当前连接类型”丢弃：control 动作优先写当前
+  control 连接，否则回查同一会话的 control 连接；session 动作同理回查 session 连接。
+- `DmsdpSession` 在加密协商完成时立即启动 TCP 保活，不再依赖手机先发一条
+  `GET_PARAMETER`；收到任意合法加密载荷都重置 `tcp_misses_`。
+- 补上对手机 `GET_PARAMETER` 的 `DMSDP/1.0 200 OK` 应答（带原 `CSeq`）。此前直接
+  `return {}`，手机会认为车机已失联。
+- 顺带修复音频监听：`kOpenAudioListener` 现在允许在加密 control 连接上触发，音频
+  `SETUP` 不再被误丢。
+
