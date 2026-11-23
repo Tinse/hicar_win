@@ -328,6 +328,15 @@ int Receiver::run() {
       if (!(*it)->socket.valid()) it = audio_connections_.erase(it);
       else ++it;
     }
+    if (app_dmsdp_ && find_dmsdp_connection(app_dmsdp_, true) == nullptr &&
+        find_dmsdp_connection(app_dmsdp_, false) == nullptr) {
+      app_dmsdp_.reset();
+      app_list_requested_ = false;
+      foreground_registered_ = false;
+      app_list_retry_at_ms_ = 0;
+      app_count_ = 0;
+      if (app_window_) app_window_->set_status("DMSDP 会话已断开");
+    }
   }
   std::puts("接收端已停止");
   return 0;
@@ -744,7 +753,19 @@ void Receiver::start_dmsdp(DataConnection& connection) {
 
   connection.dmsdp = std::make_shared<dmsdp::DmsdpSession>(cfg, key, &auth_random_);
   app_dmsdp_ = connection.dmsdp;
+  app_list_requested_ = false;
+  foreground_registered_ = false;
+  app_count_ = 0;
+  app_list_retry_at_ms_ = 0;
+  app_list_retries_ = 0;
+  codec_ability_advertised_ = false;
+  codec_blocking_reported_ = false;
+  codec_fast_streak_ = 0;
   ensure_app_window();
+  if (app_window_) {
+    app_window_->set_apps({});
+    app_window_->set_status("等待手机返回融合桌面应用列表…");
+  }
   std::printf("[业务 20] DMSDP 会话已建立：本机 %s，手机 %s\n", cfg.local_ip.c_str(),
               cfg.phone_ip.c_str());
 }
@@ -761,6 +782,18 @@ void Receiver::service_dmsdp(DataConnection& connection, const uint8_t* data, si
   }
 }
 
+DataConnection* Receiver::find_dmsdp_connection(
+    const std::shared_ptr<dmsdp::DmsdpSession>& session, bool control) {
+  if (session == nullptr) return nullptr;
+  for (auto& candidate : data_connections_) {
+    if (candidate->dmsdp == session && candidate->dmsdp_control == control &&
+        candidate->socket.valid()) {
+      return candidate.get();
+    }
+  }
+  return nullptr;
+}
+
 void Receiver::handle_dmsdp_outputs(DataConnection& connection,
                                     const std::vector<dmsdp::DmsdpOutput>& outputs) {
   for (const auto& output : outputs) {
@@ -768,14 +801,26 @@ void Receiver::handle_dmsdp_outputs(DataConnection& connection,
       switch (action->kind) {
         case dmsdp::DmsdpAction::Kind::kSend: {
           const bool to_control = action->channel == dmsdp::DmsdpChannel::kControl;
-          if (to_control != connection.dmsdp_control) {
-            std::fprintf(stderr, "[DMSDP] 发送通道与当前连接不符，丢弃\n");
+          // 定时保活和协议应答可能由 session 连接产生，但必须写到同一会话的
+          // control 连接；不能按“当前 connection 的类型”直接丢弃。
+          DataConnection* target = nullptr;
+          if (connection.dmsdp_control == to_control && connection.socket.valid()) {
+            // 当前连接优先，避免会话建立过程中 control 连接还没进 data_connections_。
+            target = &connection;
+          }
+          if (target == nullptr) {
+            target = find_dmsdp_connection(connection.dmsdp, to_control);
+          }
+          if (target == nullptr) {
+            std::fprintf(stderr, "[DMSDP] 目标 %s 连接不存在，丢弃 %zu 字节\n",
+                         to_control ? "control" : "session", action->bytes.size());
             continue;
           }
           std::string error;
-          if (!connection.socket.send_all(action->bytes.data(), action->bytes.size(), &error)) {
-            std::fprintf(stderr, "[DMSDP] 写失败：%s\n", error.c_str());
-            connection.socket.close();
+          if (!target->socket.send_all(action->bytes.data(), action->bytes.size(), &error)) {
+            std::fprintf(stderr, "[DMSDP] 写 %s 失败：%s\n", to_control ? "control" : "session",
+                         error.c_str());
+            target->socket.close();
             return;
           }
           break;
@@ -801,7 +846,7 @@ void Receiver::handle_dmsdp_outputs(DataConnection& connection,
         case dmsdp::DmsdpAction::Kind::kSendDatagram:
           break;
         case dmsdp::DmsdpAction::Kind::kOpenAudioListener: {
-          if (connection.dmsdp_control) continue;
+          // 音频触发是在加密控制连接上收到的，因此不能要求当前连接是 session。
           std::string error;
           const auto port = open_audio_listener(&error);
           if (!port.has_value()) {
@@ -898,9 +943,7 @@ std::optional<uint16_t> Receiver::open_audio_listener(std::string* error) {
   slot->port = slot->socket.local_port();
   slot->business_id = 0xFFFFFFFDu;
   slot->audio = true;
-  slot->dmsdp = data_channel_control_ != nullptr && data_channel_control_->session != nullptr
-                    ? nullptr
-                    : nullptr;
+  slot->dmsdp = nullptr;  // 音频数据连接不需要额外发 DMSDP 消息
   const uint16_t port = slot->port;
   data_listeners_.push_back(std::move(slot));
   return port;
@@ -962,6 +1005,7 @@ void Receiver::ensure_app_window() {
   app_window_->set_status("等待手机返回融合桌面应用列表…");
   app_window_->set_start_sink([this](const std::string& package_name) {
     if (package_name == "__refresh__") {
+      app_list_retries_ = 0;
       request_app_list(true);
     } else {
       start_car_app(package_name);
@@ -969,80 +1013,56 @@ void Receiver::ensure_app_window() {
   });
 }
 
-void Receiver::request_app_list(bool force) {
-  if (!app_dmsdp_) return;
-  if (!force && app_list_requested_) return;
-  const std::string model = to_hex_upper(config_.host.model_id.data(), config_.host.model_id.size()) +
-                            to_hex_upper(&config_.host.sub_model_id, 1);
-  const std::string json = "{\"RequestData\":\"all\",\"RequestCaller\":\"" + model + "\"}";
+bool Receiver::send_app_data(int32_t data_type, const std::string& json, const char* what) {
+  if (!app_dmsdp_) {
+    std::fprintf(stderr, "[应用中心] %s：DMSDP 会话未建立\n", what);
+    return false;
+  }
+  DataConnection* control = find_dmsdp_connection(app_dmsdp_, true);
+  if (control == nullptr) {
+    std::fprintf(stderr, "[应用中心] %s：控制连接未建立\n", what);
+    return false;
+  }
   try {
-    const auto outputs = app_dmsdp_->send_device_data(1, 528, std::vector<uint8_t>(json.begin(), json.end()));
-    // send_device_data 只返回动作；这里直接取出控制连接的字节交给当前 DMSDP 连接。
-    for (const auto& output : outputs) {
-      if (const auto* action = std::get_if<dmsdp::DmsdpAction>(&output)) {
-        for (auto& connection : data_connections_) {
-          if (connection->dmsdp == app_dmsdp_ && connection->dmsdp_control) {
-            std::string error;
-            if (!connection->socket.send_all(action->bytes.data(), action->bytes.size(), &error)) {
-              std::fprintf(stderr, "[应用中心] 请求应用列表写失败：%s\n", error.c_str());
-            }
-            break;
-          }
-        }
-      }
-    }
-    app_list_requested_ = true;
-    if (!foreground_registered_) {
-      const std::string subscribe = "{\"action\":\"registerForegroundAppChange\"}";
-      const auto foreground_outputs = app_dmsdp_->send_device_data(
-          1, 537, std::vector<uint8_t>(subscribe.begin(), subscribe.end()));
-      for (const auto& output : foreground_outputs) {
-        if (const auto* action = std::get_if<dmsdp::DmsdpAction>(&output)) {
-          for (auto& connection : data_connections_) {
-            if (connection->dmsdp == app_dmsdp_ && connection->dmsdp_control) {
-              std::string error;
-              if (!connection->socket.send_all(action->bytes.data(), action->bytes.size(), &error)) {
-                std::fprintf(stderr, "[应用中心] 订阅前台应用写失败：%s\n", error.c_str());
-              }
-              break;
-            }
-          }
-        }
-      }
-      foreground_registered_ = true;
-      std::puts("[应用中心] 已发送 dataType 537（订阅前台应用）");
-    }
-    if (app_window_) app_window_->set_status("已请求应用列表，等待手机返回…");
-    std::puts("[应用中心] 已发送 dataType 528（融合桌面应用列表）");
+    const auto outputs = app_dmsdp_->send_device_data(
+        1, data_type, std::vector<uint8_t>(json.begin(), json.end()));
+    handle_dmsdp_outputs(*control, outputs);
+    return true;
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "[应用中心] 请求应用列表失败：%s\n", e.what());
-    if (app_window_) app_window_->set_status(std::string("请求失败：") + e.what());
+    std::fprintf(stderr, "[应用中心] %s 失败：%s\n", what, e.what());
+    return false;
   }
 }
 
-void Receiver::start_car_app(const std::string& package_name) {
+void Receiver::request_app_list(bool force) {
   if (!app_dmsdp_) return;
+  if (!force && app_list_requested_) return;
+  if (!force) app_list_retries_ = 0;
+  const std::string model = to_hex_upper(config_.host.model_id.data(), config_.host.model_id.size()) +
+                            to_hex_upper(&config_.host.sub_model_id, 1);
+  const std::string json = "{\"RequestData\":\"all\",\"RequestCaller\":\"" + model + "\"}";
+  if (!send_app_data(528, json, "请求应用列表")) {
+    if (app_window_) app_window_->set_status("应用列表请求失败");
+    return;
+  }
+  app_list_requested_ = true;
+  app_list_retry_at_ms_ = now_millis() + 3000;
+  if (!foreground_registered_) {
+    if (send_app_data(537, "{\"action\":\"registerForegroundAppChange\"}", "订阅前台应用")) {
+      foreground_registered_ = true;
+      std::puts("[应用中心] 已发送 dataType 537（订阅前台应用）");
+    }
+  }
+  if (app_window_) app_window_->set_status("已请求应用列表，等待手机返回…");
+  std::puts("[应用中心] 已发送 dataType 528（融合桌面应用列表）");
+}
+
+void Receiver::start_car_app(const std::string& package_name) {
   const std::string json =
       "{\"RequestApp\":{\"Action\":\"start\",\"AppPackage\":\"" + package_name + "\"}}";
-  try {
-    const auto outputs = app_dmsdp_->send_device_data(1, 529, std::vector<uint8_t>(json.begin(), json.end()));
-    for (const auto& output : outputs) {
-      if (const auto* action = std::get_if<dmsdp::DmsdpAction>(&output)) {
-        for (auto& connection : data_connections_) {
-          if (connection->dmsdp == app_dmsdp_ && connection->dmsdp_control) {
-            std::string error;
-            if (!connection->socket.send_all(action->bytes.data(), action->bytes.size(), &error)) {
-              std::fprintf(stderr, "[应用中心] 启动应用写失败：%s\n", error.c_str());
-            }
-            break;
-          }
-        }
-      }
-    }
+  if (send_app_data(529, json, "启动应用")) {
     if (app_window_) app_window_->set_status("已请求手机启动 " + package_name + "，等待应答…");
     std::printf("[应用中心] 已发送 dataType 529：启动 %s\n", package_name.c_str());
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "[应用中心] 启动应用失败：%s\n", e.what());
   }
 }
 
@@ -1081,6 +1101,13 @@ void Receiver::handle_car_data(uint32_t data_type, const std::vector<uint8_t>& d
       }
     };
     walk(*parsed, 0);
+    app_count_ = apps.size();
+    if (app_count_ != 0) {
+      app_list_requested_ = false;
+      app_list_retries_ = 0;
+    }
+    app_list_retry_at_ms_ = app_count_ == 0 ? now_millis() + 3000
+                                           : 0;
     if (app_window_) {
       app_window_->set_apps(apps);
       app_window_->set_status("已获取 " + std::to_string(apps.size()) + " 个融合桌面应用");
@@ -1093,8 +1120,9 @@ void Receiver::handle_car_data(uint32_t data_type, const std::vector<uint8_t>& d
   }
   if (data_type == 529) {
     const auto parsed = auth::parse_json(text);
-    int code = 0;
+    int code = -1;
     std::string description;
+    std::string package;
     if (parsed.has_value() && parsed->is_object()) {
       std::function<void(const auth::JsonValue&, int)> walk = [&](const auth::JsonValue& value, int depth) {
         if (depth > 6) return;
@@ -1106,6 +1134,8 @@ void Receiver::handle_car_data(uint32_t data_type, const std::vector<uint8_t>& d
           }
           const auto* desc = value.find("Description");
           if (desc != nullptr && desc->is_string()) description = desc->text;
+          const auto* app = value.find("AppPackage");
+          if (app != nullptr && app->is_string()) package = app->text;
           for (const auto& member : value.object) walk(member.second, depth + 1);
         } else if (value.type == auth::JsonValue::Type::Array) {
           for (const auto& entry : value.array) walk(entry, depth + 1);
@@ -1113,13 +1143,61 @@ void Receiver::handle_car_data(uint32_t data_type, const std::vector<uint8_t>& d
       };
       walk(*parsed, 0);
     }
-    const std::string message = "启动应答：code=" + std::to_string(code) +
-                                (description.empty() ? "" : "，" + description);
+    std::string message;
+    if (code == 100000) {
+      message = "启动成功（100000）";
+    } else if (code == 100002) {
+      message = "应用不存在或未安装（100002）" + (package.empty() ? "" : "：" + package);
+    } else if (code == 100001) {
+      message = "手机拒绝启动（100001）" + (description.empty() ? "" : "：" + description);
+    } else {
+      message = "启动应答 code=" + std::to_string(code) +
+                (description.empty() ? "" : "，" + description);
+    }
     std::printf("[应用中心] %s\n", message.c_str());
     if (app_window_) app_window_->set_status(message);
     return;
   }
-  if (data_type == 537) {
+  if (data_type == 532) {
+    // 融合桌面 HiCar 前后台切换/投屏授权。只记录，不把它当成投屏开关；
+    // 投屏仍由 DMSDP 显示端口通告驱动。若应用列表还没回来，稍后再请求一次。
+    std::printf("[应用中心] 融合桌面投屏授权：%s\n", text.c_str());
+    if (app_count_ == 0 && app_list_requested_ && app_list_retries_ < 2) {
+      app_list_retry_at_ms_ = now_millis() + 1000;
+    }
+    return;
+  }
+  if (data_type == 535) {
+    const auto parsed = auth::parse_json(text);
+    bool support = false;
+    bool blocking = false;
+    if (parsed.has_value() && parsed->is_object()) {
+      std::function<void(const auth::JsonValue&, int)> walk = [&](const auth::JsonValue& value, int depth) {
+        if (depth > 4) return;
+        if (value.is_object()) {
+          const auto* is_support = value.find("isSupport");
+          if (is_support != nullptr && is_support->is_bool()) support = is_support->boolean;
+          else if (is_support != nullptr && is_support->is_number()) {
+            const auto n = is_support->as_int();
+            if (n.has_value()) support = *n != 0;
+          }
+          const auto* is_blocking = value.find("isBlocking");
+          if (is_blocking != nullptr && is_blocking->is_bool()) blocking = is_blocking->boolean;
+          else if (is_blocking != nullptr && is_blocking->is_number()) {
+            const auto n = is_blocking->as_int();
+            if (n.has_value()) blocking = *n != 0;
+          }
+          for (const auto& member : value.object) walk(member.second, depth + 1);
+        }
+      };
+      walk(*parsed, 0);
+    }
+    codec_ability_advertised_ = support;
+    std::printf("[应用中心] 视频解码能力：手机支持动态帧数=%s，当前阻塞=%s\n",
+                support ? "是" : "否", blocking ? "是" : "否");
+    return;
+  }
+  if (data_type == 533 || data_type == 537) {
     const auto parsed = auth::parse_json(text);
     std::string package;
     int app_type = 0;
@@ -1143,18 +1221,19 @@ void Receiver::handle_car_data(uint32_t data_type, const std::vector<uint8_t>& d
       };
       walk(*parsed, 0);
     }
+    const char* kind = data_type == 533 ? "前台娱乐应用" : "前台应用";
     if (package.empty()) {
-      if (app_window_) app_window_->set_status("前台应用：无（HiCar 桌面）");
-      std::puts("[应用中心] 前台应用：无");
+      if (app_window_) app_window_->set_status(std::string(kind) + "：无（HiCar 桌面）");
+      std::printf("[应用中心] %s：无\n", kind);
       return;
     }
     std::string label = package;
     if (package == "com.huawei.himovie") label = "华为视频";
     else if (package == "com.android.mediacenter") label = "华为音乐";
     if (app_window_) {
-      app_window_->set_status("前台应用：" + label + "（类型 " + std::to_string(app_type) + "）");
+      app_window_->set_status(std::string(kind) + "：" + label + "（类型 " + std::to_string(app_type) + "）");
     }
-    std::printf("[应用中心] 前台应用：%s（type %d）\n", label.c_str(), app_type);
+    std::printf("[应用中心] %s：%s（type %d）\n", kind, label.c_str(), app_type);
     return;
   }
   std::printf("[应用中心] 收到 dataType %u：%s\n", data_type, text.c_str());
@@ -1251,8 +1330,25 @@ void Receiver::start_hisight(const std::string& phone_ip, uint32_t port) {
                               auth_session_key_->at(9), auth_session_key_->at(10), auth_session_key_->at(11),
                               auth_session_key_->at(12), auth_session_key_->at(13), auth_session_key_->at(14),
                               auth_session_key_->at(15)},
-      config, [raw](const hisight::AccessUnit& unit) {
-        if (raw->decoder) raw->decoder->decode(unit.data, unit.size, unit.pts_90k);
+      config, [this, raw](const hisight::AccessUnit& unit) {
+        if (!raw->decoder) return;
+        raw->decoder->decode(unit.data, unit.size, unit.pts_90k);
+        const uint64_t decode_us = raw->decoder->last_decode_micros();
+        if (decode_us == 0 || !codec_ability_advertised_) return;
+        // 30fps 的单帧预算是 33ms；超过预算就请求手机降帧，恢复后再请求升帧。
+        if (decode_us > 35000 && !codec_blocking_reported_) {
+          codec_blocking_reported_ = true;
+          codec_fast_streak_ = 0;
+          send_app_data(535, "{\"isBlocking\":true}", "上报视频解码阻塞");
+        } else if (codec_blocking_reported_ && decode_us < 15000) {
+          if (++codec_fast_streak_ >= 30) {
+            codec_blocking_reported_ = false;
+            codec_fast_streak_ = 0;
+            send_app_data(535, "{\"isBlocking\":false}", "上报视频解码恢复");
+          }
+        } else if (!codec_blocking_reported_) {
+          codec_fast_streak_ = 0;
+        }
       });
 
   hisight_.push_back(std::move(connection));
@@ -1465,6 +1561,16 @@ void Receiver::tick() {
     }
   }
   if (audio_player_) audio_player_->pump();
+  if (app_dmsdp_ && app_list_requested_ && app_count_ == 0 && app_list_retry_at_ms_ != 0 &&
+      now >= app_list_retry_at_ms_ && app_list_retries_ < 2) {
+    ++app_list_retries_;
+    std::printf("[应用中心] 应用列表未返回，重试 %d/2\n", app_list_retries_);
+    request_app_list(true);
+    if (app_list_retries_ >= 2) {
+      app_list_retry_at_ms_ = 0;
+      if (app_window_) app_window_->set_status("手机未返回融合桌面应用列表（可能不支持 528）");
+    }
+  }
   if (app_window_) {
     app_window_->pump();
     if (app_window_->closed()) app_window_.reset();

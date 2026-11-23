@@ -144,7 +144,7 @@ void AppWindow::layout() {
   }
   // 固定入口始终存在，即使手机没把这两个包列进融合桌面。
   const int fixed_y = client.bottom - 96;
-  const int fixed_width = 280;
+  const int fixed_width = 200;
   HitBox video;
   video.rect = {24, fixed_y, 24 + fixed_width, fixed_y + 56};
   video.package_name = "com.huawei.himovie";
@@ -153,8 +153,12 @@ void AppWindow::layout() {
   music.rect = {24 + fixed_width + 16, fixed_y, 24 + fixed_width * 2 + 16, fixed_y + 56};
   music.package_name = "com.android.mediacenter";
   hits_.push_back(music);
+  HitBox market;
+  market.rect = {24 + fixed_width * 2 + 32, fixed_y, 24 + fixed_width * 3 + 32, fixed_y + 56};
+  market.package_name = "com.huawei.appmarket";
+  hits_.push_back(market);
   HitBox refresh;
-  refresh.rect = {24 + fixed_width * 2 + 32, fixed_y, 24 + fixed_width * 2 + 32 + 160, fixed_y + 56};
+  refresh.rect = {24 + fixed_width * 3 + 48, fixed_y, 24 + fixed_width * 3 + 48 + 160, fixed_y + 56};
   refresh.package_name = "__refresh__";
   hits_.push_back(refresh);
 }
@@ -174,13 +178,13 @@ void AppWindow::paint() {
   draw_text(memory, title, L"HiCar 应用中心", RGB(245, 248, 255), 30, false, true);
   RECT subtitle{24, 58, client.right - 24, 88};
   draw_text(memory, subtitle,
-            L"点击应用 → 手机启动 → HiCar 自动投屏；未列出的应用用底部固定入口直接拉起",
+            L"点击应用 → 手机启动 → HiCar 自动投屏；未安装华为视频/音乐时先点“应用市场”",
             RGB(140, 156, 180), 16);
   RECT line{24, 96, client.right - 24, 98};
   fill_round_rect(memory, line, RGB(42, 52, 68));
 
   layout();
-  for (size_t i = 0; i < apps_.size() && i < hits_.size() - 3; ++i) {
+  for (size_t i = 0; i < apps_.size() && i + 4 < hits_.size(); ++i) {
     const RECT& box = hits_[i].rect;
     fill_round_rect(memory, box, RGB(28, 35, 47));
     RECT icon{box.left + 12, box.top + 12, box.left + 52, box.top + 52};
@@ -194,13 +198,17 @@ void AppWindow::paint() {
     draw_text(memory, package, wide(apps_[i].package_name), RGB(120, 138, 160), 12);
   }
 
-  RECT video{hits_[hits_.size() - 3].rect};
+  RECT video{hits_[hits_.size() - 4].rect};
   fill_round_rect(memory, video, RGB(0, 106, 220));
   draw_text(memory, video, L"华为视频", RGB(255, 255, 255), 19, true, true);
 
-  RECT music{hits_[hits_.size() - 2].rect};
+  RECT music{hits_[hits_.size() - 3].rect};
   fill_round_rect(memory, music, RGB(0, 150, 136));
   draw_text(memory, music, L"华为音乐", RGB(255, 255, 255), 19, true, true);
+
+  RECT market{hits_[hits_.size() - 2].rect};
+  fill_round_rect(memory, market, RGB(212, 116, 0));
+  draw_text(memory, market, L"应用市场", RGB(255, 255, 255), 17, true, true);
 
   RECT refresh{hits_[hits_.size() - 1].rect};
   fill_round_rect(memory, refresh, RGB(46, 56, 72));

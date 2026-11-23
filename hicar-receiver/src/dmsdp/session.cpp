@@ -278,7 +278,7 @@ std::vector<DmsdpOutput> DmsdpSession::on_crypto_selection(const DmsdpMessage& m
     tcp_keep_alive_active_ = true;
     tcp_next_at_ = now + 1000;
     tcp_alive_ = false;
-    tcp_started_ = false;
+    tcp_started_ = true;  // 加密协商完成即可开始发保活，不必等手机先发一条
     tcp_misses_ = 0;
   }
   DmsdpEvent event;
@@ -297,6 +297,11 @@ bool is_keep_alive_request(const DmsdpMessage& message) {
 
 std::vector<DmsdpOutput> DmsdpSession::on_encrypted_payload(const std::vector<uint8_t>& payload,
                                                             uint64_t now) {
+  // 加密控制通道上任何合法载荷都说明对端还活着。保活不能只依赖手机主动发
+  // GET_PARAMETER：投屏期间控制通道可能长时间空闲，只按“请求”计数会误判超时。
+  tcp_alive_ = true;
+  tcp_misses_ = 0;
+
   if (is_device_record(payload)) {
     std::vector<DmsdpOutput> out;
     for (const auto& record : parse_device_records(payload)) {
@@ -308,9 +313,10 @@ std::vector<DmsdpOutput> DmsdpSession::on_encrypted_payload(const std::vector<ui
 
   const DmsdpMessage message = parse_dmsdp_message(payload);
   if (is_keep_alive_request(message)) {
-    tcp_alive_ = true;
-    tcp_started_ = true;
-    return {};
+    // 对端发 GET_PARAMETER 时必须回 200，否则手机会认为车机已失联。
+    // 之前这里直接 return {}，是“连接成功十几秒后断开”的另一半原因。
+    const auto* cseq = message.header("CSeq");
+    return send_text(encode_dmsdp_message(kOk, {{"CSeq", *cseq}}));
   }
   if (message.is_response()) {
     const auto* cseq = message.header("CSeq");

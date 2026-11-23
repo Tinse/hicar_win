@@ -98,12 +98,53 @@ bool FrameWindow::create(int width, int height, const std::string& title, std::s
 }
 
 void FrameWindow::close() {
+  release_backbuffer();
   if (hwnd_ != nullptr) {
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
   }
-  frame_.clear();
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    frame_.clear();
+  }
+  video_width_ = 0;
+  video_height_ = 0;
+}
+
+void FrameWindow::release_backbuffer() {
+  if (back_dc_ != nullptr) {
+    if (old_back_bitmap_ != nullptr) SelectObject(back_dc_, old_back_bitmap_);
+    DeleteDC(back_dc_);
+    back_dc_ = nullptr;
+    old_back_bitmap_ = nullptr;
+  }
+  if (back_bitmap_ != nullptr) {
+    DeleteObject(back_bitmap_);
+    back_bitmap_ = nullptr;
+  }
+  back_width_ = 0;
+  back_height_ = 0;
+}
+
+bool FrameWindow::ensure_backbuffer(HDC dc, int width, int height) {
+  if (dc == nullptr || width <= 0 || height <= 0) return false;
+  if (back_dc_ != nullptr && back_width_ == width && back_height_ == height) return true;
+  release_backbuffer();
+  back_dc_ = CreateCompatibleDC(dc);
+  if (back_dc_ == nullptr) return false;
+  back_bitmap_ = CreateCompatibleBitmap(dc, width, height);
+  if (back_bitmap_ == nullptr) {
+    DeleteDC(back_dc_);
+    back_dc_ = nullptr;
+    return false;
+  }
+  old_back_bitmap_ = static_cast<HBITMAP>(SelectObject(back_dc_, back_bitmap_));
+  back_width_ = width;
+  back_height_ = height;
+  SetStretchBltMode(back_dc_, HALFTONE);
+  SetBrushOrgEx(back_dc_, 0, 0, nullptr);
+  return true;
 }
 
 void FrameWindow::set_sinks(TouchSink touch, KeySink key, CloseSink close) {
@@ -115,14 +156,18 @@ void FrameWindow::set_sinks(TouchSink touch, KeySink key, CloseSink close) {
 void FrameWindow::set_frame(const uint8_t* bgra, int width, int height) {
   if (bgra == nullptr || width <= 0 || height <= 0) return;
   const size_t size = static_cast<size_t>(width) * height * 4;
-  frame_.resize(size);
-  std::memcpy(frame_.data(), bgra, size);
-  video_width_ = width;
-  video_height_ = height;
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    frame_.resize(size);
+    std::memcpy(frame_.data(), bgra, size);
+    video_width_ = width;
+    video_height_ = height;
+  }
   if (hwnd_ != nullptr) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 bool FrameWindow::map_point(int client_x, int client_y, int* x, int* y) const {
+  std::lock_guard<std::mutex> lock(frame_mutex_);
   if (video_width_ <= 0 || video_height_ <= 0) return false;
   RECT client{};
   GetClientRect(hwnd_, &client);
@@ -151,14 +196,29 @@ void FrameWindow::paint() {
   HDC dc = BeginPaint(hwnd_, &ps);
   RECT client{};
   GetClientRect(hwnd_, &client);
-  FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+  const int cw = client.right - client.left;
+  const int ch = client.bottom - client.top;
+  if (cw <= 0 || ch <= 0) {
+    EndPaint(hwnd_, &ps);
+    return;
+  }
+
+  // 先画到后台缓冲，再一次性 BitBlt 到窗口。不要在窗口 DC 上先 FillRect：
+  // 30fps 下那会把黑色背景直接暴露给 DWM，形成可见黑闪。
+  if (!ensure_backbuffer(dc, cw, ch)) {
+    EndPaint(hwnd_, &ps);
+    return;
+  }
+  FillRect(back_dc_, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+
+  std::lock_guard<std::mutex> lock(frame_mutex_);
   if (!frame_.empty() && video_width_ > 0 && video_height_ > 0) {
-    const int cw = client.right;
-    const int ch = client.bottom;
     const double scale = std::min(static_cast<double>(cw) / video_width_,
                                   static_cast<double>(ch) / video_height_);
     const int draw_w = static_cast<int>(video_width_ * scale);
     const int draw_h = static_cast<int>(video_height_ * scale);
+    const int dst_x = (cw - draw_w) / 2;
+    const int dst_y = (ch - draw_h) / 2;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biWidth = video_width_;
@@ -166,11 +226,18 @@ void FrameWindow::paint() {
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
-    SetStretchBltMode(dc, HALFTONE);
-    SetBrushOrgEx(dc, 0, 0, nullptr);
-    StretchDIBits(dc, (cw - draw_w) / 2, (ch - draw_h) / 2, draw_w, draw_h, 0, 0, video_width_,
-                  video_height_, frame_.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+    if (draw_w == video_width_ && draw_h == video_height_) {
+      // 等尺寸时不做拉伸，比 StretchDIBits 快一个数量级。
+      SetDIBitsToDevice(back_dc_, dst_x, dst_y, static_cast<DWORD>(video_width_),
+                        static_cast<DWORD>(video_height_), 0, 0, 0,
+                        static_cast<DWORD>(video_height_), frame_.data(), &info,
+                        DIB_RGB_COLORS);
+    } else {
+      StretchDIBits(back_dc_, dst_x, dst_y, draw_w, draw_h, 0, 0, video_width_, video_height_,
+                    frame_.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+    }
   }
+  BitBlt(dc, 0, 0, cw, ch, back_dc_, 0, 0, SRCCOPY);
   EndPaint(hwnd_, &ps);
 }
 
@@ -184,6 +251,13 @@ LRESULT FrameWindow::handle_message(UINT message, WPARAM wparam, LPARAM lparam) 
   switch (message) {
     case WM_PAINT:
       paint();
+      return 0;
+    case WM_ERASEBKGND:
+      // 背景完全由后台缓冲覆盖；擦背景会造成黑闪。
+      return 1;
+    case WM_SIZE:
+      release_backbuffer();
+      InvalidateRect(hwnd_, nullptr, FALSE);
       return 0;
     case WM_LBUTTONDOWN: {
       int x = 0;
@@ -248,6 +322,7 @@ LRESULT FrameWindow::handle_message(UINT message, WPARAM wparam, LPARAM lparam) 
       if (close_sink_) close_sink_();
       return 0;
     case WM_DESTROY:
+      release_backbuffer();
       hwnd_ = nullptr;
       return 0;
     default:

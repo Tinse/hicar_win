@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -37,8 +38,17 @@ class FrameWindow {
   LRESULT handle_message(UINT message, WPARAM wparam, LPARAM lparam);
   bool map_point(int client_x, int client_y, int* x, int* y) const;
   void paint();
+  bool ensure_backbuffer(HDC dc, int width, int height);
+  void release_backbuffer();
 
   HWND hwnd_ = nullptr;
+  HDC back_dc_ = nullptr;
+  HBITMAP back_bitmap_ = nullptr;
+  HBITMAP old_back_bitmap_ = nullptr;
+  int back_width_ = 0;
+  int back_height_ = 0;
+  mutable std::mutex frame_mutex_;
+
   std::vector<uint8_t> frame_;
   int video_width_ = 0;
   int video_height_ = 0;

@@ -121,6 +121,8 @@ class Receiver {
   void service_dmsdp(DataConnection& connection, const uint8_t* data, size_t size);
   void handle_dmsdp_outputs(DataConnection& connection,
                             const std::vector<dmsdp::DmsdpOutput>& outputs);
+  DataConnection* find_dmsdp_connection(const std::shared_ptr<dmsdp::DmsdpSession>& session,
+                                        bool control);
   std::optional<uint16_t> open_dmsdp_control_listener(
       const std::shared_ptr<dmsdp::DmsdpSession>& session, std::string* error);
   std::optional<uint16_t> open_audio_listener(std::string* error);
@@ -129,6 +131,7 @@ class Receiver {
   void ensure_app_window();
   void request_app_list(bool force);
   void start_car_app(const std::string& package_name);
+  bool send_app_data(int32_t data_type, const std::string& json, const char* what);
   void handle_car_data(uint32_t data_type, const std::vector<uint8_t>& data);
   void service_auth(DataConnection& connection, const uint8_t* data, size_t size);
   void handle_auth_outputs(DataConnection& connection, const std::vector<auth::AuthOutput>& outputs);
@@ -160,6 +163,12 @@ class Receiver {
   std::shared_ptr<dmsdp::DmsdpSession> app_dmsdp_;
   bool app_list_requested_ = false;
   bool foreground_registered_ = false;
+  size_t app_count_ = 0;
+  uint64_t app_list_retry_at_ms_ = 0;
+  int app_list_retries_ = 0;
+  bool codec_ability_advertised_ = false;
+  bool codec_blocking_reported_ = false;
+  int codec_fast_streak_ = 0;
   std::string device_id_;
   std::string pin_code_;
   std::string pairing_qr_text_;

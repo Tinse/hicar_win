@@ -25,6 +25,7 @@ class MfH264Decoder {
   bool opened() const { return transform_ != nullptr; }
   int width() const { return width_; }
   int height() const { return height_; }
+  uint64_t last_decode_micros() const { return last_decode_micros_; }
 
  private:
   bool configure_output();
@@ -38,6 +39,7 @@ class MfH264Decoder {
   int out_width_ = 0;
   int out_height_ = 0;
   int out_stride_ = 0;
+  uint64_t last_decode_micros_ = 0;
   bool nv12_ = true;
   std::vector<uint8_t> bgra_;
 };

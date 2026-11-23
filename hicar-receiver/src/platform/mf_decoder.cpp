@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 using Microsoft::WRL::ComPtr;
@@ -132,6 +133,8 @@ bool MfH264Decoder::configure_output() {
 
 bool MfH264Decoder::decode(const uint8_t* data, size_t size, uint64_t pts_90k) {
   if (transform_ == nullptr || data == nullptr || size == 0) return false;
+  const auto started = std::chrono::steady_clock::now();
+  last_decode_micros_ = 0;
 
   ComPtr<IMFSample> sample;
   ComPtr<IMFMediaBuffer> buffer;
@@ -202,6 +205,9 @@ bool MfH264Decoder::decode(const uint8_t* data, size_t size, uint64_t pts_90k) {
     if (provides_samples) sample->Release();
     break;
   }
+  last_decode_micros_ = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - started).count());
   return true;
 }
 
