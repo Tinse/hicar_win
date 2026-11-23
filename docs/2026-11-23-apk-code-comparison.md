@@ -40,3 +40,11 @@
 - 音频会话在 control 连接触发后的 `SETUP`/RTP 播放链路。
 - BLE 自动发现（GATT Server/BR MAC）尚未实现，当前扫码方案可用。
 - Windows 不能安装 APK；华为视频/音乐只能在手机上安装，接收端负责启动和投屏。
+
+## 参考接口
+
+- 融合桌面应用列表（528）：<https://developer.huawei.com/consumer/cn/doc/development/HiCar-Guides/get-app-list-0000001606309545>
+- 融合桌面应用操作（529，`RespCode=100000/100001/100002`）：<https://device.harmonyos.com/cn/docs/develop/DevicePartner-References/fusion-ui-app-operation-0000001607687489>
+- 车机视频流解码能力（535）：<https://developer.huawei.com/consumer/cn/doc/DP-HiCar-Guides/video-stream-decode-0000001918714700>
+- 数据交互类型表（532/533/535/537）：<https://developer.huawei.com/consumer/cn/doc/HiCar-References/data-interaction-0000001199330031>
+
